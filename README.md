@@ -297,15 +297,27 @@ openpyxl==3.1.5    # pure Python, from PyPI
 
 `supie build` installs them with micropip under Deno and ships them in the function. Pure-Python packages come from PyPI. Packages with compiled code only work if Pyodide builds them, such as pydantic, numpy and pandas, and those come from Pyodide's CDN. MicroPython functions can't use packages; put pure-Python modules in the function's folder instead.
 
-Packages cost boot time, and a cold start must fit in the 2 s CPU budget:
+Packages cost boot time, and a cold start must fit in the 2 s CPU budget. Preload them, and the snapshot holds them already imported:
 
-| | cold boot on an Apple Silicon Mac | hosted Supabase, 20 requests |
+```toml
+[functions.validate]
+runtime = "pyodide"
+preload = ["pydantic", "openpyxl", "main"]  # "main" also bakes in your models
+```
+
+pydantic and openpyxl, validating rows:
+
+| | cold boot, Edge Runtime on a Mac | hosted Supabase, 20 requests |
 |---|---|---|
-| no packages | 0.12 s | |
-| pydantic and openpyxl | 0.78 s | half failed on the CPU limit |
-| pydantic, with openpyxl preloaded | 0.52 s | all succeeded, about 2.3 s end to end |
+| imported at boot | 0.72 s | half failed on the CPU limit |
+| packages preloaded | 0.42 s | all succeeded, median 1.6 s end to end |
+| packages and `main` preloaded | 0.20 s | all succeeded, median 1.2 s end to end |
 
-Preload pure-Python packages with `preload = ["openpyxl"]`, so the snapshot holds them already imported. A snapshot can't hold compiled extensions, so `supie build` refuses to preload a package such as pydantic; it's imported at boot instead. That makes heavy compiled packages a tight fit for now.
+Preloading works for compiled extensions too. A snapshot copies the interpreter's memory but not the extensions it loaded, such as pydantic's core, so supie records where each one was loaded and loads it there again before restoring. That takes a small patch to Pyodide's loader, which `supie build` applies and checks against the pinned Pyodide version.
+
+Preloading your own module (`"main"` here) runs its module-level code at build time and keeps the result: pydantic models, lookup tables, a loaded model. Never read secrets at module level in a preloaded module, or they end up in the snapshot file; read them in `on_boot`.
+
+The cost is size. pydantic preloaded makes the function about 18 MB of Supabase's 20 MB limit, so heavier stacks such as pandas won't fit.
 
 Other settings: `verify_jwt` (default `true`) and, for MicroPython, `heap_mb` (default 16). A `[project]` table can move the source folder (`source = "py"`) or the Supabase folder (`supabase = "supabase"`).
 
@@ -317,11 +329,11 @@ Other settings: `verify_jwt` (default `true`) and, for MicroPython, `heap_mb` (d
 - **Pyodide snapshot.** Pyodide boots from a memory snapshot of an already-initialized interpreter, built with Deno and cached.
 - **Calls out.** Python reaches Supabase through the shim's `fetch`, since WebAssembly has no sockets.
 
-Two workarounds are built in: Supabase's runtime refuses shared WebAssembly memory, and it doesn't define `setImmediate`. The prototype README explains both.
+Two workarounds are built in: Supabase's runtime refuses shared WebAssembly memory, and it doesn't define `setImmediate`. The prototype README explains both. For snapshots that hold compiled extensions, supie also patches where Pyodide's loader places them, as described under Packages.
 
 ## Limitations
 
-- **Compiled packages are slow to boot.** pydantic's import is near the 2 s CPU budget on hosted Supabase, since snapshots can't hold compiled extensions yet.
+- **Bundle size caps Pyodide stacks.** Pyodide plus pydantic, preloaded, is about 18 MB of the 20 MB limit.
 - **No direct Postgres connection.** Use the Supabase client, or an RPC for raw SQL.
 - **Text request bodies only.** Binary request bodies are not supported yet. Responses and Storage handle bytes.
 - **No watch mode.** `supie serve` doesn't rebuild on file changes yet.

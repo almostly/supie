@@ -147,3 +147,12 @@ def test_requirements_parsing(project):
     )
     function = build.load_project(project).functions["hello"]
     assert function.requirements == ["pydantic==2.12.5", "openpyxl"]
+
+
+def test_pyodide_patch_checks_the_code():
+    """The snapshot patch refuses a Pyodide whose loader code differs."""
+    with pytest.raises(build.BuildError, match="doesn't match"):
+        build.patch_pyodide("var memoryBase=somethingElse;")
+    old, new = build.PYODIDE_PATCHES[0]
+    second_old, _ = build.PYODIDE_PATCHES[1]
+    assert new in build.patch_pyodide(old + second_old)

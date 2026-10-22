@@ -1,7 +1,14 @@
 // Main service for the Edge Runtime image in the tests: starts each function
 // as a user worker with Supabase's hosted limits. The fake Supabase project is
 // the echo function in the same container. Send x-cold: 1 for a fresh worker.
-const staticFiles = ["runtime/*", "snapshot.bin.gz", "packages.zip", "model.onnx"];
+const staticFiles = [
+  "runtime/*",
+  "snapshot.bin.gz",
+  "snapshot.json",
+  "dylibs/*",
+  "packages.zip",
+  "model.onnx",
+];
 
 Deno.serve(async (req: Request) => {
   const name = new URL(req.url).pathname.split("/").filter(Boolean)[0];

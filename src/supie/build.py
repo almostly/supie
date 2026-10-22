@@ -251,59 +251,126 @@ def packages(function: Function, runtime_dir: Path) -> Path | None:
     return cached
 
 
+# Lets python_pyodide.ts load a compiled extension at the memory and table
+# position it had when the snapshot was taken, and records where each one
+# lands so make_snapshot.ts can save it. Pinned to Pyodide's Emscripten output.
+PYODIDE_PATCHES = [
+    (
+        "var memoryBase=metadata.memorySize?alignMemory(getMemory(metadata.memorySize"
+        "+memAlign),memAlign):0;var tableBase=metadata.tableSize?wasmTable.length:0;",
+        "var supieForced=Module.supieForcedDylibs&&Module.supieForcedDylibs[libName];"
+        "var memoryBase=supieForced?supieForced.memoryBase:(metadata.memorySize?"
+        "alignMemory(getMemory(metadata.memorySize+memAlign),memAlign):0);"
+        "var tableBase=supieForced?supieForced.tableBase:(metadata.tableSize?"
+        "wasmTable.length:0);(Module.supieLoadedDylibs||=[]).push({name:libName,"
+        "memoryBase,tableBase});",
+    ),
+    (
+        "if(metadata.tableSize){wasmTable.grow(metadata.tableSize)}",
+        "if(metadata.tableSize){if(supieForced){var supieGrow=tableBase+"
+        "metadata.tableSize-wasmTable.length;if(supieGrow>0)wasmTable.grow(supieGrow)}"
+        "else{wasmTable.grow(metadata.tableSize)}}",
+    ),
+]
+
+
+def patch_pyodide(text: str) -> str:
+    """Apply PYODIDE_PATCHES to pyodide.asm.mjs, failing if Pyodide's code changed."""
+    for old, new in PYODIDE_PATCHES:
+        if text.count(old) != 1:
+            raise BuildError(
+                "this Pyodide build doesn't match supie's snapshot patch; "
+                "a newer supie may support it"
+            )
+        text = text.replace(old, new)
+    return text
+
+
+def copy_runtime(runtime: runtimes.Runtime, source: Path, target: Path) -> None:
+    """Copy a runtime's files, patching Pyodide's loader."""
+    target.mkdir(parents=True, exist_ok=True)
+    for name in runtime.files:
+        if runtime.name == "pyodide" and name == "pyodide.asm.mjs":
+            (target / name).write_text(patch_pyodide((source / name).read_text()))
+        else:
+            shutil.copy2(source / name, target / name)
+
+
 def snapshot(
-    function: Function, runtime_dir: Path, packages_zip: Path | None = None
+    function: Function,
+    runtime_dir: Path,
+    packages_zip: Path | None = None,
+    files: tuple[dict[str, str], dict[str, bytes]] | None = None,
 ) -> tuple[Path, bool]:
-    """Build the Pyodide snapshot, or reuse a cached one; return it and whether it was cached."""
+    """Build the Pyodide snapshot, or reuse a cached one; return its folder and whether it was cached.
+
+    The folder holds snapshot.bin.gz, snapshot.json and dylibs/: the compiled
+    extensions the preloads imported, which the function loads again before
+    restoring. files are the function's own (from collect_files), so preload can
+    name its modules; without them, only supie is in the snapshot.
+    """
+    if files is None:
+        text = {
+            f"supie/{name}": resources.files("supie").joinpath(name).read_text()
+            for name in RUNTIME_MODULES
+        }
+        files = (text, {})
     runtime = runtimes.RUNTIMES["pyodide"]
     digest = hashlib.sha256(runtime.version.encode())
-    for name in RUNTIME_MODULES:
-        digest.update(resources.files("supie").joinpath(name).read_bytes())
+    for name, content in sorted(files[0].items()):
+        digest.update(name.encode() + b"\0" + content.encode())
+    for name, data in sorted(files[1].items()):
+        digest.update(name.encode() + b"\0" + data)
     digest.update(_template("make_snapshot.ts").encode())
+    digest.update(repr(PYODIDE_PATCHES).encode())
     digest.update(",".join(sorted(function.preload)).encode())
     if packages_zip is not None:
         digest.update(packages_zip.read_bytes())
-    cached = runtimes.cache_dir() / "snapshots" / f"{digest.hexdigest()[:24]}.bin.gz"
-    if cached.is_file():
+    cached = runtimes.cache_dir() / "snapshots" / digest.hexdigest()[:24]
+    if (cached / "snapshot.json").is_file():
         return cached, True
 
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        package = work / "app" / "supie"
-        package.mkdir(parents=True)
-        for name in RUNTIME_MODULES:
-            (package / name).write_text(
-                resources.files("supie").joinpath(name).read_text()
-            )
+        for name, content in files[0].items():
+            (work / "app" / name).parent.mkdir(parents=True, exist_ok=True)
+            (work / "app" / name).write_text(content)
+        for name, data in files[1].items():
+            (work / "app" / name).parent.mkdir(parents=True, exist_ok=True)
+            (work / "app" / name).write_bytes(data)
+        copy_runtime(runtime, runtime_dir, work / "runtime")
         script = work / "make_snapshot.ts"
         script.write_text(_template("make_snapshot.ts"))
-        raw = work / "snapshot.bin"
+        out = work / "out"
         command = _deno() + [
             "run",
             "-A",
             str(script),
-            str(runtime_dir),
+            str(work / "runtime"),
             str(work / "app"),
-            str(raw),
+            str(out),
             ", ".join(function.preload),
         ]
         if packages_zip is not None:
             command.append(str(packages_zip))
         result = subprocess.run(command, capture_output=True, text=True, cwd=work)
-        if result.returncode == 3:
-            raise BuildError(
-                f"{function.name}: {_tail(result.stderr, 1)}. Remove it from preload "
-                "in supie.toml; it's imported at boot instead."
-            )
-        if result.returncode != 0 or not raw.is_file():
+        if result.returncode != 0 or not (out / "snapshot.json").is_file():
             raise BuildError(
                 f"{function.name}: building the Pyodide snapshot failed:\n"
                 f"{_tail(result.stderr)}"
             )
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        partial = cached.with_suffix(".partial")
-        with open(raw, "rb") as src, gzip.open(partial, "wb", compresslevel=9) as dst:
+        raw = out / "snapshot.bin"
+        with (
+            open(raw, "rb") as src,
+            gzip.open(out / "snapshot.bin.gz", "wb", compresslevel=9) as dst,
+        ):
             shutil.copyfileobj(src, dst)
+        raw.unlink()
+        partial = cached.with_name(cached.name + ".partial")
+        shutil.rmtree(partial, ignore_errors=True)
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(out, partial)
+        shutil.rmtree(cached, ignore_errors=True)
         partial.rename(cached)
     return cached, False
 
@@ -329,8 +396,7 @@ def build(project: Project, function: Function) -> Report:
 
     shutil.rmtree(out, ignore_errors=True)
     (out / "runtime").mkdir(parents=True)
-    for name in runtime.files:
-        shutil.copy2(runtime_dir / name, out / "runtime" / name)
+    copy_runtime(runtime, runtime_dir, out / "runtime")
     index.write_text(_template("index.ts", NAME=function.name))
     (out / "python.ts").write_text(
         _template(
@@ -346,14 +412,47 @@ def build(project: Project, function: Function) -> Report:
     if function.runtime == "pyodide":
         (out / "compat.ts").write_text(_template("compat.ts"))
         zipped = packages(function, runtime_dir)
+        own = {
+            name.split("/")[0].removesuffix(".py")
+            for name in [*text, *binary]
+            if not name.startswith("supie/")
+        }
+        preloads_own = bool(own & {m.split(".")[0] for m in function.preload})
+        folder, cached = snapshot(
+            function, runtime_dir, zipped, (text, binary) if preloads_own else None
+        )
+        shutil.copytree(folder, out, dirs_exist_ok=True)
         if zipped is not None:
-            shutil.copy2(zipped, out / "packages.zip")
+            _ship_packages(zipped, folder, out / "packages.zip")
             static.append(f"./functions/{function.name}/packages.zip")
-        path, cached = snapshot(function, runtime_dir, zipped)
-        shutil.copy2(path, out / "snapshot.bin.gz")
-        static.append(f"./functions/{function.name}/snapshot.bin.gz")
+        static += [
+            f"./functions/{function.name}/snapshot.bin.gz",
+            f"./functions/{function.name}/snapshot.json",
+        ]
+        if any((out / "dylibs").iterdir()):
+            static.append(f"./functions/{function.name}/dylibs/*")
     _configure(project.supabase / "config.toml", function, static)
     return Report(function, out, compressed_size(out), cached)
+
+
+def _ship_packages(zipped: Path, snapshot_dir: Path, target: Path) -> None:
+    """Copy the packages zip, minus the extensions the snapshot restores itself."""
+    import zipfile
+
+    restored = set()
+    for dylib in json.loads((snapshot_dir / "snapshot.json").read_text())["dylibs"]:
+        _, _, rel = dylib["name"].partition("/site-packages/")
+        restored.add(rel)
+    if not restored:
+        shutil.copy2(zipped, target)
+        return
+    with (
+        zipfile.ZipFile(zipped) as src,
+        zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as dst,
+    ):
+        for item in src.infolist():
+            if item.filename not in restored:
+                dst.writestr(item, src.read(item.filename))
 
 
 def compressed_size(folder: Path) -> int:

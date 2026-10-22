@@ -45,16 +45,19 @@ def edge(tmp_path_factory, images):
     for name in FUNCTIONS:
         shutil.copytree(HERE / "demo", root / "py" / name)
     shutil.copytree(HERE / "packages", root / "py" / "packages")
+    shutil.copytree(HERE / "packages", root / "py" / "preloaded")
     (root / "supie.toml").write_text(
         '[functions.demo-pyodide]\nruntime = "pyodide"\n\n'
-        '[functions.packages]\nruntime = "pyodide"\n'
+        '[functions.packages]\nruntime = "pyodide"\n\n'
+        '[functions.preloaded]\nruntime = "pyodide"\n'
+        'preload = ["pydantic", "openpyxl", "main"]\n'
     )
     shutil.copytree(HERE / "echo", root / "supabase" / "functions" / "echo")
     from conftest import tiny_model
 
     (root / "supabase" / "functions" / "echo" / "model.onnx").write_bytes(tiny_model())
     project = build.load_project(root)
-    for name in FUNCTIONS + ["packages"]:
+    for name in FUNCTIONS + ["packages", "preloaded"]:
         build.build(project, project.functions[name])
 
     port = _free_port()
@@ -261,17 +264,21 @@ def test_packages(edge):
     }
 
 
-def test_preloading_compiled_code_is_refused(tmp_path):
-    """A snapshot can't hold compiled extensions, so preloading pydantic fails the build."""
-    (tmp_path / "supabase").mkdir()
-    (tmp_path / "supabase" / "config.toml").write_text('project_id = "p"\n')
-    shutil.copytree(HERE / "packages", tmp_path / "py" / "pk")
-    (tmp_path / "supie.toml").write_text(
-        '[functions.pk]\nruntime = "pyodide"\npreload = ["pydantic"]\n'
-    )
-    project = build.load_project(tmp_path)
-    with pytest.raises(build.BuildError, match="compiled code"):
-        build.build(project, project.functions["pk"])
+def test_preloaded_compiled_package(edge):
+    """pydantic preloaded into the snapshot: its compiled core loads again at restore.
+
+    Under the hosted 2 s CPU limit, unlike importing pydantic at boot.
+    """
+    rows = [{"email": "A@B.COM", "amount": "12.5"}, {"email": "nope", "amount": 3}]
+    for _ in range(3):
+        status, _, body = call(
+            edge, "POST", "/preloaded/validate", {"rows": rows}, {"x-cold": "1"}
+        )
+        assert status == 200, body
+        assert json.loads(body) == {
+            "ok": [{"email": "a@b.com", "amount": 12.5}],
+            "errors": [{"row": 1, "error": "Value error, not an email"}],
+        }
 
 
 @pytest.mark.parametrize("fn", FUNCTIONS)

@@ -17,18 +17,60 @@ async function readSnapshot(path: string): Promise<Uint8Array> {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
+type Dylib = { name: string; memoryBase: number; tableBase: number };
+
+// A snapshot copies the interpreter's memory but not the compiled extensions
+// (pydantic-core, numpy, ...) it had loaded: those are separate WebAssembly
+// modules. Before Pyodide copies the memory back, grow memory to the snapshot's
+// size and load each extension again at the memory and table positions it had
+// (the runtime is patched to accept them). The copy then overwrites whatever
+// loading wrote, leaving the extensions exactly as they were.
+function withDylibs(dylibs: Dylib[], files: Uint8Array[]) {
+  // deno-lint-ignore no-explicit-any
+  return (settings: any) => {
+    let restore: (snapshot: Uint8Array) => unknown;
+    Object.defineProperty(settings.API, "restoreSnapshot", {
+      configurable: true,
+      set(fn) {
+        restore = fn;
+      },
+      get() {
+        return (snapshot: Uint8Array) => {
+          const header = new Uint32Array(snapshot.buffer, snapshot.byteOffset, 4);
+          const heapSize = snapshot.byteLength - header[1];
+          const brk = settings._sbrk(0);
+          if (heapSize > brk) settings._sbrk(heapSize - brk);
+          settings.supieForcedDylibs = Object.fromEntries(dylibs.map((d) => [d.name, d]));
+          dylibs.forEach((dylib, i) => {
+            settings.FS.mkdirTree(dirname(dylib.name));
+            settings.FS.writeFile(dylib.name, files[i]);
+            settings.loadDynamicLibrary(dylib.name, { global: false, nodelete: true });
+          });
+          delete settings.supieForcedDylibs;
+          return restore(snapshot);
+        };
+      },
+    });
+    return createPyodideModule(settings);
+  };
+}
+
 export async function loadPython(here: string) {
   const indexURL = `${here}runtime/`;
+  const { dylibs } = JSON.parse(await Deno.readTextFile(`${here}snapshot.json`));
+  const files = await Promise.all(
+    (dylibs as Dylib[]).map((_, i) => Deno.readFile(`${here}dylibs/${i}.so`)),
+  );
   const py = await loadPyodide({
     indexURL,
-    createPyodideModule,
+    createPyodideModule: withDylibs(dylibs, files),
     lockFileContents: await Deno.readTextFile(`${indexURL}pyodide-lock.json`),
     stdout: (line: string) => console.log(line),
     stderr: (line: string) => console.error(line),
     _loadSnapshot: readSnapshot(`${here}snapshot.bin.gz`),
   });
-  // Packages from requirements.txt: unpacked on every boot, since a snapshot
-  // can't hold compiled extensions.
+  // Packages from requirements.txt. Preloaded ones are already imported; the
+  // files are still needed for anything imported later.
   const packages = await Deno.readFile(`${here}packages.zip`).catch(() => null);
   if (packages) {
     const sitePackages = py.runPython("import site; site.getsitepackages()[0]");
