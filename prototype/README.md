@@ -1,13 +1,16 @@
 # Prototype: Python in a Supabase Edge Function
 
-A Supabase Edge Function whose request handler is written in Python (`supabase/functions/py-hello/handler.py`). A thin TypeScript shim boots Pyodide 314.0.7 (CPython 3.14 on WebAssembly) once per worker and passes each request to `handle(req: dict) -> dict`.
+Two Supabase Edge Functions whose request handlers are written in Python. A thin TypeScript shim boots the interpreter once per worker and passes each request to `handle(req: dict) -> dict`.
+
+- `py-hello` runs Pyodide 314.0.7, which is CPython 3.14 on WebAssembly, with packages.
+- `mpy-hello` runs MicroPython 1.29, a much smaller interpreter covering most of the language with a small standard library.
 
 This is the experiment supie grows out of. It runs on Supabase's real Edge Runtime under the hosted limits.
 
 ## Layout
 
 ```
-fetch_pyodide.sh               vendors Pyodide from npm, --snapshot also builds the snapshot
+fetch_runtimes.sh              vendors Pyodide and MicroPython from npm, --snapshot builds the snapshot
 supabase/
   config.toml                  per_worker policy, static_files for Pyodide
   functions/snapshot.env       PY_SNAPSHOT=snapshot.bin.gz (omit to boot cold)
@@ -17,6 +20,10 @@ supabase/
     handler.py                 the Python code
     pyodide/                   fetched: wasm, stdlib zip, lockfile
     snapshot.bin.gz            fetched: pre-booted interpreter memory, about 6 MB
+  functions/mpy-hello/
+    index.ts                   shim for MicroPython
+    handler.py                 the same work, without the statistics module
+    micropython/               fetched: wasm and loader, under 0.5 MB
 edge-runtime/index.ts          main service for running the Edge Runtime image directly
 bench/
   bench_edge.py                cold and warm timings against the Edge Runtime container
@@ -27,7 +34,7 @@ bench/
 ## Setup
 
 ```bash
-./fetch_pyodide.sh --snapshot
+./fetch_runtimes.sh --snapshot
 ```
 
 This needs npm. Deno runs through npx, so nothing else gets installed.
@@ -45,7 +52,8 @@ docker run -d --name supie-edge -p 127.0.0.1:9123:9000 \
 curl -s -XPOST http://127.0.0.1:9123/py-hello -H "x-snapshot: 1" \
   -d '{"name":"Denis","xs":[2,4,4,4,5,5,7,9],"n":100000}'
 
-python3 bench/bench_edge.py 7
+python3 bench/bench_edge.py py-hello 7
+python3 bench/bench_edge.py mpy-hello 7
 ```
 
 Send `x-cold: 1` to force a fresh worker.
@@ -72,16 +80,28 @@ TypeError: Creating a shared memory is not supported
 
 A second difference: bundled static files can be read whole with `Deno.readFile` but not opened as streams with `Deno.open`, so the shim reads the snapshot whole before decompressing it.
 
+## MicroPython fixes
+
+MicroPython's loader takes its Node code path under the Edge Runtime and reads the wasm with Node's fs. Two things follow:
+
+- **Pass a file path.** A blob URL gets treated as a file name and fails, so the shim passes the wasm's path.
+- **Define Buffer.** The loader expects a global `Buffer`, which the runtime doesn't define, so the shim sets it from `node:buffer`.
+
+MicroPython needs no shared memory, so it doesn't need `compat.ts`.
+
 ## Results
 
 Edge Runtime v1.77.4 in Docker on an Apple Silicon Mac, with 2 s CPU and 256 MB limits, 7 cold workers per mode:
 
 | | cold boot, wall | warm request, wall | memory (heap+external) |
 |---|---|---|---|
-| plain | 0.86 to 0.97 s | 0.21 ms | 71 MB |
-| snapshot (.gz) | 0.12 to 0.13 s | 0.24 ms | 102 MB |
+| Pyodide, plain | 0.86 to 0.97 s | 0.21 ms | 71 MB |
+| Pyodide, snapshot (.gz) | 0.12 to 0.13 s | 0.24 ms | 102 MB |
+| MicroPython | 4.3 to 5.7 ms | 0.18 ms | 32 MB |
 
-A 1M-iteration Python loop takes about 0.19 s. A 30M-iteration loop is cancelled by the runtime's CPU limit.
+A 1M-iteration Python loop takes about 0.17 s on Pyodide and 0.52 s on MicroPython. A 30M-iteration loop is cancelled by the runtime's CPU limit on both.
+
+MicroPython boots about 26 times faster than the Pyodide snapshot but runs Python loops about 3 times slower. Hosted Supabase boots a fresh worker for nearly every request, so MicroPython wins for handlers that do little computation.
 
 The runtime doesn't expose CPU counters to the worker, so `cpu_ms` reads 0 there and wall time is the measure. Boot runs on the isolate thread, so its CPU is at most its wall time. Plain boots therefore fit the 2 s budget on this machine, and snapshot boots fit with a wide margin.
 

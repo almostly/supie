@@ -2,7 +2,7 @@
 // Supabase CLI. Each function runs as a user worker with the hosted limits.
 // Request headers: x-cold: 1 forces a fresh worker, x-snapshot: 1 boots
 // Pyodide from snapshot.bin.gz.
-const staticFiles = ["pyodide/*", "handler.py", "snapshot.bin.gz"];
+const staticFiles = ["pyodide/*", "micropython/*", "handler.py", "snapshot.bin.gz"];
 
 Deno.serve(async (req: Request) => {
   const name = new URL(req.url).pathname.split("/").filter(Boolean)[0];

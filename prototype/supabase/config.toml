@@ -23,3 +23,10 @@ static_files = [
   # (supabase/functions/snapshot.env locally, `supabase secrets set` when hosted).
   "./functions/py-hello/snapshot.bin.gz",
 ]
+
+[functions.mpy-hello]
+verify_jwt = false
+static_files = [
+  "./functions/mpy-hello/micropython/*",
+  "./functions/mpy-hello/handler.py",
+]
