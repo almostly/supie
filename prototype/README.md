@@ -4,6 +4,7 @@ Two Supabase Edge Functions whose request handlers are written in Python. A thin
 
 - `py-hello` runs Pyodide 314.0.7, which is CPython 3.14 on WebAssembly, with packages.
 - `mpy-hello` runs MicroPython 1.29, a much smaller interpreter covering most of the language with a small standard library.
+- `ts-hello` does the same work in TypeScript, as the baseline.
 
 This is the experiment supie grows out of. It runs on Supabase's real Edge Runtime under the hosted limits.
 
@@ -24,6 +25,7 @@ supabase/
     index.ts                   shim for MicroPython
     handler.py                 the same work, without the statistics module
     micropython/               fetched: wasm and loader, under 0.5 MB
+  functions/ts-hello/index.ts  the same handler in TypeScript
 edge-runtime/index.ts          main service for running the Edge Runtime image directly
 bench/
   bench_edge.py                cold and warm timings against the Edge Runtime container
@@ -102,6 +104,19 @@ Edge Runtime v1.77.4 in Docker on an Apple Silicon Mac, with 2 s CPU and 256 MB 
 A 1M-iteration Python loop takes about 0.17 s on Pyodide and 0.52 s on MicroPython. A 30M-iteration loop is cancelled by the runtime's CPU limit on both.
 
 MicroPython boots about 26 times faster than the Pyodide snapshot but runs Python loops about 3 times slower. Hosted Supabase boots a fresh worker for nearly every request, so MicroPython wins for handlers that do little computation.
+
+### Compared with TypeScript
+
+The same container, timed from the client, so a cold request includes creating the worker and loading the module:
+
+| | cold request | warm request | 1M-iteration loop | 10M-iteration loop |
+|---|---|---|---|---|
+| TypeScript | 14.8 ms | 0.98 ms | 4 ms | 35 ms |
+| MicroPython | 25.2 ms | 1.50 ms | 668 ms | cancelled by the CPU limit |
+| Pyodide, snapshot | 164.5 ms | 1.34 ms | 175 ms | 1757 ms |
+
+- **Startup and request handling are close.** MicroPython adds about 10 ms to a cold request and about 0.5 ms to a warm one.
+- **Computation is not.** V8 compiles the TypeScript loop to machine code, so it runs about 45 times faster than Pyodide and about 170 times faster than MicroPython.
 
 The runtime doesn't expose CPU counters to the worker, so `cpu_ms` reads 0 there and wall time is the measure. Boot runs on the isolate thread, so its CPU is at most its wall time. Plain boots therefore fit the 2 s budget on this machine, and snapshot boots fit with a wide margin.
 

@@ -30,3 +30,6 @@ static_files = [
   "./functions/mpy-hello/micropython/*",
   "./functions/mpy-hello/handler.py",
 ]
+
+[functions.ts-hello]
+verify_jwt = false
