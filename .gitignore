@@ -17,3 +17,6 @@ build/
 
 # build output of the examples
 examples/*/supabase/functions/
+
+# Supabase CLI state, from running the CLI in the repo
+supabase/.temp/

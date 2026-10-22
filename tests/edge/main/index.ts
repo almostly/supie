@@ -6,13 +6,15 @@ const staticFiles = ["runtime/*", "snapshot.bin.gz", "packages.zip"];
 Deno.serve(async (req: Request) => {
   const name = new URL(req.url).pathname.split("/").filter(Boolean)[0];
   const servicePath = `/home/deno/functions/${name}`;
+  // Hosted's 2 s CPU limit, unless a test asks for more with x-cpu-ms.
+  const cpuMs = Number(req.headers.get("x-cpu-ms") ?? 2000);
   try {
     const worker = await EdgeRuntime.userWorkers.create({
       servicePath,
       memoryLimitMb: 256,
       workerTimeoutMs: 150_000,
-      cpuTimeSoftLimitMs: 2000,
-      cpuTimeHardLimitMs: 2000,
+      cpuTimeSoftLimitMs: cpuMs,
+      cpuTimeHardLimitMs: cpuMs,
       noModuleCache: false,
       envVars: [
         ["SUPABASE_URL", "http://localhost:9000/echo"],
