@@ -286,3 +286,30 @@ def test_onnx_model_from_storage(edge, fn):
     want = [1 / (1 + math.exp(-(2 * a - 3 * b + 0.5))) for a, b in rows]
     assert result["inputs"] == ["features"]
     assert result["pd"] == pytest.approx(want, abs=1e-6)
+
+
+@pytest.mark.parametrize("fn", FUNCTIONS)
+def test_signed_webhook(edge, fn):
+    """HMAC-SHA256 and compare_digest work on both runtimes."""
+    import hashlib
+    import hmac
+
+    body = {"statuses": [{"id": 1, "status": "delivered"}]}
+    raw = json.dumps(body).encode()
+    good = hmac.new(b"webhook-secret", raw, hashlib.sha256).hexdigest()
+    base, _ = edge
+    for signature, status in [(good, 200), ("0" * 64, 401), ("", 401)]:
+        request = urllib.request.Request(
+            f"{base}/{fn}/webhook",
+            data=raw,
+            method="POST",
+            headers={"x-signature": signature},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                assert (response.status, json.loads(response.read())) == (
+                    200,
+                    {"accepted": 1},
+                )
+        except urllib.error.HTTPError as error:
+            assert error.code == status == 401

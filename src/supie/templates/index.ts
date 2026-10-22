@@ -33,7 +33,20 @@ const host = {
     wantBase64: boolean,
   ) => {
     const payload = body == null ? undefined : bodyBase64 ? decodeBase64(body) : body;
-    const response = await fetch(url, { method, headers: JSON.parse(headersJson), body: payload });
+    let response: Response;
+    try {
+      response = await fetch(url, { method, headers: JSON.parse(headersJson), body: payload });
+    } catch (err) {
+      // fetch throws rather than answering for network errors and for Supabase's
+      // limit on calls between functions (RateLimitError); report it as data.
+      const error = err as Error;
+      return JSON.stringify({
+        status: 0,
+        headers: {},
+        body: "",
+        error: { name: error.name, message: error.message },
+      });
+    }
     const text = wantBase64
       ? encodeBase64(new Uint8Array(await response.arrayBuffer()))
       : await response.text();

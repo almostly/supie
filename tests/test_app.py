@@ -194,3 +194,14 @@ def test_bad_route():
         app.get("nope")(lambda req: None)
     with pytest.raises(ValueError):
         app.get("/x/{y:uuid}")(lambda req, y: None)
+
+
+def test_compare_digest():
+    """Constant-time comparison, for str and bytes, including the fallback."""
+    from supie import compare_digest
+    from supie.app import compare_digest as runtime_compare
+
+    assert compare_digest("abc", "abc") and compare_digest(b"abc", "abc")
+    assert not compare_digest("abc", "abd")
+    assert not compare_digest("abc", "abcd") and not compare_digest("", "a")
+    assert runtime_compare is compare_digest

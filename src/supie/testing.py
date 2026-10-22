@@ -152,7 +152,18 @@ class FakeHost:
             raw = base64.b64decode(body)
         call = Call(method, url, jsonlib.loads(headers_json), raw)
         self.calls.append(call)
-        response = self.handler(call) if self.handler else FakeResponse("", 404)
+        try:
+            response = self.handler(call) if self.handler else FakeResponse("", 404)
+        except Exception as error:  # what the shim reports when fetch throws
+            name = type(error).__name__
+            return jsonlib.dumps(
+                {
+                    "status": 0,
+                    "headers": {},
+                    "body": "",
+                    "error": {"name": name, "message": str(error)},
+                }
+            )
         payload = response.body
         if want_base64:
             data = payload.encode() if isinstance(payload, str) else payload

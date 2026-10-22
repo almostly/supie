@@ -13,7 +13,9 @@ import sys
 import time
 from pathlib import Path
 
-IMAGES = runpy.run_path(str(Path(__file__).parent.parent / "tests" / "images.py"))["IMAGES"]
+IMAGES = runpy.run_path(str(Path(__file__).parent.parent / "tests" / "images.py"))[
+    "IMAGES"
+]
 DOCKER_HUB = {
     "public.ecr.aws/supabase/edge-runtime": "supabase/edge-runtime",
     "public.ecr.aws/supabase/postgres": "supabase/postgres",

@@ -106,6 +106,8 @@ await req.supabase.functions.invoke("fraud-check", {"id": 7})
 data = await req.supabase_admin.storage.from_("models").download("scorecard.json")
 ```
 
+Hosted Supabase allows 30 calls from one function to another per request trace and minute, counting nested calls and calls made by background work. Past that, `functions.invoke` and `ctx.invoke` raise `supie.supabase.RateLimited`, with `retry_after` in seconds. Calls to PostgREST, Storage and other hosts don't count: 60 PostgREST calls in one request all succeeded.
+
 `req.supabase` acts as the caller, forwarding their token so row level security applies. `req.supabase_admin` uses the service role key and bypasses it. Both read `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY`, which Supabase sets for every function.
 
 The query builder covers `select`, `insert`, `upsert`, `update`, `delete`, the filters `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `is_` and `in_`, plus `filter`, `order`, `limit`, `offset` and `single`. A failed call raises `supie.supabase.SupabaseError` with the status and message.
@@ -205,6 +207,7 @@ scoring.mount(app, "/flows/scoring")  # or start runs in the background
 - **Retries and timeouts.** `retries` adds attempts after a failure, waiting `backoff`, then twice that, and so on. `timeout` fails an async step that runs too long. When the attempts run out, the step and the run are saved as failed and `run` raises `StepFailed`.
 - **Branches.** A step returns `ctx.goto(branch)` to hand its result to a branch. Branches run only when a step goes to them, like a Choice state.
 - **The result.** It's the last step's output. A flow that ends in several steps returns a dict of them.
+- **Calling other functions.** `ctx.invoke` counts toward the 30 calls per trace described under Supabase from Python, so a flow that fans out to other functions should stay well under 30 calls. Checkpoint writes don't count.
 - **Context.** `ctx` has `run_id`, `step`, `attempt`, `supabase` (as the caller when the run came from a request), `supabase_admin` and `invoke(name, body)` for calling other edge functions.
 - **Resuming.** Run the same run ID again with `scoring.run(None, run_id=...)`. Saved steps are skipped and the saved input is used.
 

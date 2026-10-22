@@ -188,3 +188,39 @@ def test_filter_values(value, expected):
     from supie.supabase import _value
 
     assert _value(value) == expected
+
+
+class RateLimitError(Exception):
+    """Stands in for the error Supabase's fetch throws over the per-trace limit."""
+
+
+def test_rate_limit_and_network_errors():
+    """A thrown RateLimitError becomes RateLimited; other throws become SupabaseError(0)."""
+    from supie.supabase import RateLimited
+
+    async def handler(req):
+        """Invoke twice: once rate limited, once failing to connect."""
+        out = {}
+        try:
+            await req.supabase.functions.invoke("busy", {})
+        except RateLimited as error:
+            out["limited"] = [error.status, error.retry_after]
+        try:
+            await req.supabase.functions.invoke("down", {})
+        except SupabaseError as error:
+            out["down"] = [error.status, error.message]
+        return out
+
+    def fetch(call):
+        """Throw as Supabase's fetch would."""
+        if call.url.endswith("/busy"):
+            raise RateLimitError(
+                "Rate limit exceeded for trace abc. Retry after 59971ms."
+            )
+        raise ConnectionError("connection refused")
+
+    _, response = run(handler, fetch)
+    assert response.json() == {
+        "limited": [429, 59.971],
+        "down": [0, "ConnectionError: connection refused"],
+    }

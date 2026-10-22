@@ -153,3 +153,21 @@ async def model(req: Request):
         "pd": [row[0] for row in out["probability"]],
         "inputs": app.state.model.inputs,
     }
+
+
+# A signed webhook, as leads-supabase's delivery-status receives.
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
+
+from supie import HTTPError as _HTTPError, compare_digest  # noqa: E402
+
+
+@app.post("/webhook")
+def webhook(req: Request):
+    """Accept the body only with a valid HMAC-SHA256 signature."""
+    expected = hmac.new(
+        b"webhook-secret", req.body.encode(), hashlib.sha256
+    ).hexdigest()
+    if not compare_digest(req.headers.get("x-signature", ""), expected):
+        raise _HTTPError(401, "bad signature")
+    return {"accepted": len(req.json()["statuses"])}

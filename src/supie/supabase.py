@@ -23,6 +23,33 @@ class SupabaseError(Exception):
         self.details = details
 
 
+class RateLimited(SupabaseError):
+    """Supabase refused a call between functions: too many in one request trace.
+
+    Hosted Supabase allows 30 calls from functions to functions per trace and
+    minute; PostgREST, Storage and other hosts don't count. retry_after is in
+    seconds.
+    """
+
+    def __init__(self, message, retry_after=None):
+        """Store the message and how long to wait, when Supabase says."""
+        super().__init__(429, message)
+        self.retry_after = retry_after
+
+
+def _retry_after(message):
+    """Parse "Retry after 59971ms" into seconds, or None."""
+    marker = "Retry after "
+    if marker not in message:
+        return None
+    digits = ""
+    for char in message[message.index(marker) + len(marker) :]:
+        if not char.isdigit():
+            break
+        digits += char
+    return int(digits) / 1000 if digits else None
+
+
 class Result:
     """The outcome of a query: the rows (or object) and, when asked for, the count."""
 
@@ -66,11 +93,22 @@ def _list_value(value):
 
 
 async def fetch(method, url, headers, body=None, body_base64=False, want_base64=False):
-    """Call the shim's fetch and return status, headers and body as a dict."""
+    """Call the shim's fetch and return status, headers and body as a dict.
+
+    Raises RateLimited when Supabase refuses a call between functions, and
+    SupabaseError (status 0) when the request couldn't be made at all.
+    """
     raw = await get_host().fetch(
         url, method, json.dumps(headers), body, body_base64, want_base64
     )
-    return json.loads(raw)
+    response = json.loads(raw)
+    error = response.get("error")
+    if error:
+        message = error.get("message") or ""
+        if error.get("name") == "RateLimitError":
+            raise RateLimited(message, _retry_after(message))
+        raise SupabaseError(0, (error.get("name") or "Error") + ": " + message)
+    return response
 
 
 def _error(response):

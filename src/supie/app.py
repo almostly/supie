@@ -284,6 +284,27 @@ async def wait_for(task, seconds):
     return state["value"]
 
 
+def compare_digest(a, b):
+    """Compare two str or bytes values in constant time, for signatures and tokens.
+
+    hmac.compare_digest where it exists; MicroPython lacks it.
+    """
+    if isinstance(a, str):
+        a = a.encode()
+    if isinstance(b, str):
+        b = b.encode()
+    try:
+        import hmac
+
+        return hmac.compare_digest(a, b)
+    except (ImportError, AttributeError):
+        pass
+    result = len(a) ^ len(b)
+    for x, y in zip(a, b + bytes(max(0, len(a) - len(b)))):
+        result |= x ^ y
+    return result == 0
+
+
 def new_id():
     """A random 128-bit hex ID from the platform's CSPRNG."""
     return str(get_host().uuid())
