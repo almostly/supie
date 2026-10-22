@@ -23,14 +23,21 @@ alter table public.supie_queue_dead enable row level security;
 revoke all on public.supie_queue_dead from anon, authenticated;
 grant select, insert, delete on public.supie_queue_dead to service_role;
 
--- Create a queue if it doesn't exist (pgmq.create is idempotent).
+-- Create a queue if it doesn't exist. pgmq.create alone isn't safe when new
+-- workers call it at the same moment (concurrent DDL collides), so creation
+-- is serialized per queue name and skipped once the queue exists.
 create or replace function public.supie_queue_create(queue text)
 returns void
-language sql
+language plpgsql
 security definer
 set search_path = ''
 as $$
-  select pgmq.create(queue)
+begin
+  perform pg_advisory_xact_lock(hashtext('supie_queue:' || queue));
+  if not exists (select 1 from pgmq.meta as m where m.queue_name = queue) then
+    perform pgmq.create(queue);
+  end if;
+end
 $$;
 
 -- Send messages, after delay seconds; returns their IDs.

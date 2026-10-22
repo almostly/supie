@@ -181,3 +181,25 @@ def test_queue_in_the_edge_runtime(rest, edge_queue, fn, queue_name):
     )
     with urllib.request.urlopen(stats, timeout=30) as response:
         assert json.loads(response.read())["dead"] == 1
+
+
+def test_concurrent_creates_of_a_new_queue(rest):
+    """New workers create the same queue at once; none of them may fail."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from stack import docker
+
+    _, db = rest
+
+    def create(_):
+        """One worker's first call."""
+        return docker(
+            "exec", db, "psql", "-U", "postgres", "-h", "localhost", "-tAc",
+            "select public.supie_queue_create('pg_race')",
+        ).returncode  # fmt: skip
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        assert list(pool.map(create, range(12))) == [0] * 12
+    assert (
+        psql(db, "select count(*) from pgmq.meta where queue_name = 'pg_race'") == "1"
+    )
