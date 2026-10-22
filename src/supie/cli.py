@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 
@@ -47,7 +48,7 @@ def main(
     """Write Supabase Edge Functions in Python."""
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     """Print an error and exit with status 1."""
     typer.secho(f"error: {message}", fg="red", err=True)
     raise typer.Exit(1)
@@ -77,7 +78,12 @@ def init(
         _fail(f"{folder} already exists")
     folder.mkdir(parents=True)
     for template in ("main.py", "test_main.py"):
-        text = resources.files("supie").joinpath("templates", template).read_text()
+        text = (
+            resources.files("supie")
+            .joinpath("templates")
+            .joinpath(template)
+            .read_text()
+        )
         (folder / template).write_text(text.replace("__NAME__", name))
     if runtime != "micropython":
         config = project.root / "supie.toml"
@@ -210,18 +216,29 @@ def deploy(
 
 
 @flow_app.command("migration")
-def flow_migration(root: Path = Root) -> None:
-    """Write the migration for the workflow tables to supabase/migrations/."""
+def flow_migration(
+    root: Path = Root,
+    pgflow: bool = typer.Option(
+        False, "--pgflow", help="The functions for durable runs on pgflow instead."
+    ),
+) -> None:
+    """Write the migration for workflow checkpoints, or for pgflow, to supabase/migrations/."""
     project = build.load_project(root)
     migrations = project.supabase / "migrations"
-    existing = sorted(migrations.glob("*_supie_flows.sql"))
+    suffix = "supie_pgflow" if pgflow else "supie_flows"
+    existing = sorted(migrations.glob(f"*_{suffix}.sql"))
     if existing:
         _fail(f"{existing[-1]} already exists")
     migrations.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    path = migrations / f"{stamp}_supie_flows.sql"
-    path.write_text(resources.files("supie").joinpath("sql", "flows.sql").read_text())
+    path = migrations / f"{stamp}_{suffix}.sql"
+    source = "pgflow.sql" if pgflow else "flows.sql"
+    path.write_text(
+        resources.files("supie").joinpath("sql").joinpath(source).read_text()
+    )
     typer.echo(f"wrote {path.relative_to(project.root)}")
+    if pgflow:
+        typer.echo("needs pgflow installed first: npx pgflow@0.17.2 install")
     typer.echo("next: `supabase db push` (or `supabase migration up` locally)")
 
 

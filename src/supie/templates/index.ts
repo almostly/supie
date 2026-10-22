@@ -23,7 +23,8 @@ const encodeBase64 = (bytes: Uint8Array) => {
 // What Python can call: environment variables and fetch, with every value
 // passed as a string so both runtimes convert them the same way.
 const host = {
-  env: (name: string) => Deno.env.get(name) ?? null,
+  // undefined, not null: Pyodide keeps JS null as jsnull, not Python None.
+  env: (name: string) => Deno.env.get(name),
   fetch: async (
     url: string,
     method: string,

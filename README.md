@@ -211,7 +211,8 @@ scoring.mount(app, "/flows/scoring")  # or start runs in the background
 
 - **Steps.** A step receives a context, the flow's input and its dependencies' outputs, in the order of `depends_on`. It can be sync or async, and must return something JSON can hold.
 - **Retries and timeouts.** `retries` adds attempts after a failure, waiting `backoff`, then twice that, and so on. `timeout` fails an async step that runs too long. When the attempts run out, the step and the run are saved as failed and `run` raises `StepFailed`.
-- **Branches.** A step returns `ctx.goto(branch)` to hand its result to a branch. Branches run only when a step goes to them, like a Choice state.
+- **Conditions.** `when=` runs a step only if its input contains a JSON pattern, and `unless=` skips it if it does. The input is the outputs of the step's dependencies, by step name, or the flow's input for a step without dependencies. So `when={"decide": {"route": "review"}}` runs a step only on that route. A skipped step's dependents still run and get `None` for it. These are pgflow's conditions, so they work in durable runs too.
+- **Branches.** A step returns `ctx.goto(branch)` to hand its result to a branch, which then counts as that step's output. Branches run only when a step goes to them. They work in inline runs only; durable runs use `when=`.
 - **The result.** It's the last step's output. A flow that ends in several steps returns a dict of them.
 - **Calling other functions.** `ctx.invoke` counts toward the 30 calls per trace described under Supabase from Python, so a flow that fans out to other functions should stay well under 30 calls. Checkpoint writes don't count.
 - **Context.** `ctx` has `run_id`, `step`, `attempt`, `supabase` (as the caller when the run came from a request), `supabase_admin` and `invoke(name, body)` for calling other edge functions.
@@ -249,6 +250,37 @@ select cron.schedule('resume-scoring', '* * * * *', $$
   )
 $$);
 ```
+
+### Durable runs on pgflow
+
+Inline runs live inside one worker. For runs that must outlive any worker, run the same flow on [pgflow](https://pgflow.dev): Postgres schedules each step, keeps every output, and retries failed steps; supie's workers claim and run them.
+
+```bash
+npx pgflow@0.17.2 install            # pgflow's schema and queues
+supie flow migration --pgflow        # functions that let supie's workers reach pgflow
+supabase db push
+```
+
+```python
+scoring.mount(app, "/flows/scoring", durable=True)
+
+# or from your own handler:
+run_id = await scoring.start(application, request=req)
+state = await scoring.status(run_id)
+```
+
+| Endpoint | What it does |
+|---|---|
+| `POST <prefix>` | Starts a run on pgflow, answers 202 with its `run_id`, and works on it after the response. |
+| `GET <prefix>/<run_id>` | Returns the status, output and each step's state, including skipped steps and errors. |
+| `POST <prefix>/work?seconds=60` | For the service role: claims and runs waiting tasks. Call it from pg_cron, so runs continue after a worker stops. |
+
+- **The flow compiles itself.** On a worker's first run, supie sends the flow's shape to pgflow. A shape that differs from the one in the database is an error, so change a durable flow by giving it a new name.
+- **Retries are pgflow's.** `retries` and `backoff` become pgflow's max attempts and base delay; a failed attempt goes back to the queue.
+- **Names are pgflow's.** Flow and step names use letters, digits and single underscores. `goto` branches aren't supported; use `when=`.
+- **Bridged over PostgREST.** pgflow's functions live in the `pgflow` and `pgmq` schemas, which PostgREST doesn't expose, and WebAssembly can't open a Postgres connection. The `--pgflow` migration adds `supie_pgflow_*` functions that only the service role can call.
+
+Tested against pgflow 0.17.2 on Supabase's Postgres, with workers in the Edge Runtime on MicroPython and Pyodide: parallel steps, a retry, a skipped route and the endpoints.
 
 ## Testing
 
@@ -342,14 +374,17 @@ Two workarounds are built in: Supabase's runtime refuses shared WebAssembly memo
 - **Bundle size caps Pyodide stacks.** Pyodide plus pydantic, preloaded, is about 18 MB of the 20 MB limit.
 - **No direct Postgres connection.** Use the Supabase client, or an RPC for raw SQL.
 - **Text request bodies only.** Binary request bodies are not supported yet. Responses and Storage handle bytes.
-- **Flows run inside one worker.** A worker that stops mid-run leaves the run for `resume-stale`. A pgflow-backed mode, where Postgres schedules each step, is planned.
+- **Inline flows run inside one worker.** A worker that stops mid-run leaves the run for `resume-stale`. Use durable runs on pgflow for runs that must outlive a worker.
 
 ## Development
+
+All of supie's Python is annotated, including the modules that run in the function: annotations are never evaluated, so they cost MicroPython nothing. ruff requires annotations in `src/` and `scripts/`, and ty checks them. Both run as hooks and in CI.
 
 ```bash
 uv sync
 uv run pytest -m "not edge and not postgres"   # unit tests
-uv run pytest -m "edge or postgres"   # Edge Runtime, Postgres and PostgREST images, needs Docker
+uv run pytest -m "edge or postgres"   # Edge Runtime, Postgres, PostgREST and pgflow, needs Docker
+uv run ty check src tests scripts examples   # types
 ```
 
 CI runs the Docker tests against pinned images. A weekly workflow runs them against the images the Supabase CLI ships that day, so a new Edge Runtime, Postgres or PostgREST release that breaks supie shows up before users hit it.

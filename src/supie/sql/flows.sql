@@ -22,7 +22,7 @@ create table if not exists public.supie_flow_runs (
 create table if not exists public.supie_flow_steps (
   run_id text not null references public.supie_flow_runs (id) on delete cascade,
   step text not null,
-  status text not null check (status in ('succeeded', 'failed')),
+  status text not null check (status in ('succeeded', 'failed', 'skipped')),
   output jsonb,
   error text,
   attempts integer not null default 1,

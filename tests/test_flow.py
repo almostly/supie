@@ -115,6 +115,7 @@ def test_retries_then_succeeds():
 
     result = run(flow.run({}), sleep_scale=0)
     assert result.output == "ok" and attempts == [1, 2, 3]
+    assert isinstance(flow.store, MemoryStore)
     assert flow.store.runs[result.run_id]["step_rows"]["call_bureau"]["attempts"] == 3
 
 
@@ -266,3 +267,111 @@ def test_mount_resume_and_resume_stale():
     response = client.post("/flows/scoring/resume-stale", headers=service)
     assert response.json() == {"resumed": [run_id]}
     assert flow.store.runs[run_id]["status"] == "succeeded"
+
+
+def test_contains_matches_postgres_semantics():
+    """when/unless use jsonb containment: nested objects, arrays, no bool/int mixing."""
+    from supie.flow import contains
+
+    assert contains({"a": {"b": 1, "c": 2}}, {"a": {"b": 1}})
+    assert not contains({"a": {"b": 1}}, {"a": {"b": 2}})
+    assert contains({"tags": ["x", "y"]}, {"tags": ["y"]})
+    assert not contains({"tags": ["x"]}, {"tags": ["y"]})
+    assert not contains({"flag": 1}, {"flag": True})
+    assert contains({"flag": True}, {"flag": True})
+    assert not contains("text", {"a": 1})
+
+
+def routing_flow(calls):
+    """Score, decide a route, then approve or review depending on it."""
+    flow = Flow("routing", MemoryStore())
+
+    @flow.step()
+    def score(ctx, application):
+        """A PD from the input."""
+        calls.append("score")
+        return {"pd": application["pd"]}
+
+    @flow.step(depends_on=[score])
+    def decide(ctx, application, score):
+        """Pick a route."""
+        calls.append("decide")
+        return {"route": "review" if score["pd"] > 0.1 else "approve"}
+
+    @flow.step(depends_on=[decide], when={"decide": {"route": "approve"}})
+    def approve(ctx, application, decide):
+        """Runs only on the approve route."""
+        calls.append("approve")
+        return {"decision": "approve"}
+
+    @flow.step(depends_on=[decide], when={"decide": {"route": "review"}})
+    def review(ctx, application, decide):
+        """Runs only on the review route."""
+        calls.append("review")
+        return {"decision": "refer"}
+
+    @flow.step(unless={"test": True})
+    def notify(ctx, application):
+        """A root step skipped for test applications."""
+        calls.append("notify")
+        return "sent"
+
+    return flow
+
+
+def test_when_routes_and_skips():
+    """Only the matching route runs; the result holds the final steps that ran."""
+    calls = []
+    flow = routing_flow(calls)
+    result = run(flow.run({"pd": 0.3, "test": True}))
+    assert sorted(calls) == ["decide", "review", "score"]
+    assert result.output == {"review": {"decision": "refer"}}
+    assert "approve" not in result.steps
+    rows = flow.store.runs[result.run_id]["step_rows"]
+    assert (
+        rows["approve"]["status"] == "skipped" and rows["notify"]["status"] == "skipped"
+    )
+
+    calls.clear()
+    result = run(flow.run({"pd": 0.01}))
+    assert result.output == {"approve": {"decision": "approve"}, "notify": "sent"}
+
+
+def test_dependents_of_skipped_steps_get_none():
+    """A step after a skipped one still runs, with None for it."""
+    flow = Flow("after-skip", MemoryStore())
+
+    @flow.step(when={"go": True})
+    def maybe(ctx, input):
+        """Skipped unless go is true."""
+        return "ran"
+
+    @flow.step(depends_on=[maybe])
+    def after(ctx, input, maybe):
+        """Reports what it got."""
+        return {"maybe": maybe}
+
+    assert run(flow.run({"go": False})).output == {"maybe": None}
+    assert run(flow.run({"go": True})).output == {"maybe": "ran"}
+
+
+def test_shape_for_pgflow():
+    """A flow compiles to pgflow's shape; goto branches and bad names are refused."""
+    flow = routing_flow([])
+    flow.name = "routing"
+    shape = flow.shape()
+    review = next(s for s in shape["steps"] if s["slug"] == "review")
+    assert review["dependencies"] == ["decide"]
+    assert review["requiredInputPattern"] == {
+        "defined": True,
+        "value": {"decide": {"route": "review"}},
+    }
+    assert review["forbiddenInputPattern"] == {"defined": False}
+    notify = next(s for s in shape["steps"] if s["slug"] == "notify")
+    assert notify["forbiddenInputPattern"] == {"defined": True, "value": {"test": True}}
+    assert review["options"]["maxAttempts"] == 1
+
+    with pytest.raises(ValueError, match="branch"):
+        scoring_flow().shape()
+    with pytest.raises(ValueError, match="isn't valid in pgflow"):
+        Flow("scoring-flow").shape()
