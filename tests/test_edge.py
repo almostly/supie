@@ -222,10 +222,15 @@ def test_flow_mounted(edge, fn):
 
 
 def test_packages(edge):
-    """pydantic (compiled, from Pyodide's CDN) and openpyxl (pure, from PyPI) work."""
+    """pydantic (compiled, from Pyodide's CDN) and openpyxl (pure, from PyPI) work.
+
+    pydantic's import makes a cold boot close to the 2 s CPU limit (see the README),
+    which slow CI runners exceed, so this test allows more CPU.
+    """
+    roomy = {"x-cpu-ms": "10000"}
     rows = [{"email": "A@B.COM", "amount": "12.5"}, {"email": "nope", "amount": 3}]
     status, _, body = call(
-        edge, "POST", "/packages/validate", {"rows": rows}, {"x-cold": "1"}
+        edge, "POST", "/packages/validate", {"rows": rows}, {"x-cold": "1", **roomy}
     )
     assert status == 200, body
     assert json.loads(body) == {
@@ -243,7 +248,7 @@ def test_packages(edge):
     data = io.BytesIO()
     book.save(data)
     payload = {"workbook": base64.b64encode(data.getvalue()).decode()}
-    status, _, body = call(edge, "POST", "/packages/xlsx", payload)
+    status, _, body = call(edge, "POST", "/packages/xlsx", payload, roomy)
     assert status == 200, body
     assert json.loads(body) == {
         "ok": [{"email": "x@y.org", "amount": 7.0}],
