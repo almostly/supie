@@ -48,10 +48,11 @@ def _free_port():
 
 
 def _docker(*args, **kwargs):
-    """Run a docker command, failing loudly."""
-    return subprocess.run(
-        ["docker", *args], check=True, capture_output=True, text=True, **kwargs
-    )
+    """Run a docker command, failing the test with Docker's error if it fails."""
+    result = subprocess.run(["docker", *args], capture_output=True, text=True, **kwargs)
+    if result.returncode:
+        pytest.fail(f"docker {args[0]} failed:\n{result.stderr}")
+    return result
 
 
 @pytest.fixture(scope="module")

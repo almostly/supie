@@ -56,7 +56,7 @@ def edge(tmp_path_factory, images):
 
     port = _free_port()
     container = f"supie-test-{uuid.uuid4().hex[:8]}"
-    subprocess.run(
+    started = subprocess.run(
         [
             "docker",
             "run",
@@ -74,9 +74,11 @@ def edge(tmp_path_factory, images):
             "--main-service",
             "/home/deno/main",
         ],
-        check=True,
         capture_output=True,
+        text=True,
     )
+    if started.returncode:
+        pytest.fail("docker run failed:\n" + started.stderr)
     base = f"http://127.0.0.1:{port}"
     for _ in range(150):
         try:
