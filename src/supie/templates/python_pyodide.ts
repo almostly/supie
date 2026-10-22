@@ -27,6 +27,13 @@ export async function loadPython(here: string) {
     stderr: (line: string) => console.error(line),
     _loadSnapshot: readSnapshot(`${here}snapshot.bin.gz`),
   });
+  // Packages from requirements.txt: unpacked on every boot, since a snapshot
+  // can't hold compiled extensions.
+  const packages = await Deno.readFile(`${here}packages.zip`).catch(() => null);
+  if (packages) {
+    const sitePackages = py.runPython("import site; site.getsitepackages()[0]");
+    py.unpackArchive(packages, "zip", { extractDir: sitePackages });
+  }
   return {
     runtime: "pyodide",
     registerJsModule: (name: string, module: object) => py.registerJsModule(name, module),

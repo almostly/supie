@@ -28,6 +28,11 @@ class Runtime:
     files: tuple[str, ...]
 
     @property
+    def cdn(self) -> str:
+        """Pyodide's CDN folder for this version, where its prebuilt packages live."""
+        return f"https://cdn.jsdelivr.net/pyodide/v{self.version}/full/"
+
+    @property
     def tarball(self) -> str:
         """The package's tarball URL on the npm registry."""
         base = self.package.rsplit("/", 1)[-1]

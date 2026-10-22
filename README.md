@@ -241,6 +241,27 @@ runtime = "pyodide"
 preload = ["statistics", "decimal"]  # imported into the snapshot, so boot doesn't pay for them
 ```
 
+### Packages
+
+A Pyodide function can use packages from PyPI: list them in a `requirements.txt` next to `main.py`, with pinned versions.
+
+```text
+pydantic==2.12.5   # Pyodide's build, with its compiled core
+openpyxl==3.1.5    # pure Python, from PyPI
+```
+
+`supie build` installs them with micropip under Deno and ships them in the function. Pure-Python packages come from PyPI. Packages with compiled code only work if Pyodide builds them, such as pydantic, numpy and pandas, and those come from Pyodide's CDN. MicroPython functions can't use packages; put pure-Python modules in the function's folder instead.
+
+Packages cost boot time, and a cold start must fit in the 2 s CPU budget:
+
+| | cold boot on an Apple Silicon Mac | hosted Supabase, 20 requests |
+|---|---|---|
+| no packages | 0.12 s | |
+| pydantic and openpyxl | 0.78 s | half failed on the CPU limit |
+| pydantic, with openpyxl preloaded | 0.52 s | all succeeded, about 2.3 s end to end |
+
+Preload pure-Python packages with `preload = ["openpyxl"]`, so the snapshot holds them already imported. A snapshot can't hold compiled extensions, so `supie build` refuses to preload a package such as pydantic; it's imported at boot instead. That makes heavy compiled packages a tight fit for now.
+
 Other settings: `verify_jwt` (default `true`) and, for MicroPython, `heap_mb` (default 16). A `[project]` table can move the source folder (`source = "py"`) or the Supabase folder (`supabase = "supabase"`).
 
 ## How it works
@@ -255,7 +276,7 @@ Two workarounds are built in: Supabase's runtime refuses shared WebAssembly memo
 
 ## Limitations
 
-- **No PyPI packages yet.** Ship pure-Python modules by putting them in the function's folder.
+- **Compiled packages are slow to boot.** pydantic's import is near the 2 s CPU budget on hosted Supabase, since snapshots can't hold compiled extensions yet.
 - **No direct Postgres connection.** Use the Supabase client, or an RPC for raw SQL.
 - **Text request bodies only.** Binary request bodies are not supported yet. Responses and Storage handle bytes.
 - **No watch mode.** `supie serve` doesn't rebuild on file changes yet.

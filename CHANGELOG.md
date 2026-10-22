@@ -13,3 +13,5 @@
 - `typing` and `__future__` stand-ins for MicroPython.
 - Workflows (`supie.flow`): steps with dependencies, parallel execution, retries, timeouts and `goto` branches, checkpointed per run in Supabase tables (`supie flow migration`) or in memory, with endpoints to start, inspect and resume runs.
 - `gather`, `wait_for` and `sleep` for concurrency inside handlers.
+- Packages for Pyodide functions from `requirements.txt`: pure-Python wheels from PyPI and Pyodide's prebuilt packages from its CDN, installed at build time and cached. Pure-Python packages can be preloaded into the snapshot.
+- `supie build` reports the compressed size, close to what Supabase counts against the bundle limit.

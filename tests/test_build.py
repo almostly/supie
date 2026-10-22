@@ -128,3 +128,22 @@ def test_flow_migration(project):
     assert "create table if not exists public.supie_flow_runs" in path.read_text()
     again = cli("flow", "migration", "--root", project)
     assert again.exit_code == 1 and "already exists" in again.output
+
+
+def test_requirements_need_pyodide(project):
+    """A requirements.txt on a MicroPython function is refused with the fix."""
+    cli("init", "hello", "--root", project)
+    (project / "py" / "hello" / "requirements.txt").write_text("pydantic==2.12.5\n")
+    result = cli("build", "--root", project)
+    assert result.exit_code == 1
+    assert 'runtime = "pyodide"' in result.output
+
+
+def test_requirements_parsing(project):
+    """Comments and blank lines in requirements.txt are ignored."""
+    cli("init", "hello", "--runtime", "pyodide", "--root", project)
+    (project / "py" / "hello" / "requirements.txt").write_text(
+        "# models\npydantic==2.12.5  # compiled\n\nopenpyxl\n"
+    )
+    function = build.load_project(project).functions["hello"]
+    assert function.requirements == ["pydantic==2.12.5", "openpyxl"]

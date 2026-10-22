@@ -108,7 +108,7 @@ def _build(root: Path, names: list[str] | None) -> build.Project:
                 )
             line = (
                 f"built {name} ({report.function.runtime}) -> "
-                f"{report.out.relative_to(project.root)}, {_mb(report.size)}{note}"
+                f"{report.out.relative_to(project.root)}, {_mb(report.size)} compressed{note}"
             )
             typer.echo(line)
             if report.over_limit:

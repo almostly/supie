@@ -55,6 +55,17 @@ class Function:
     heap_mb: int = 16
     preload: list[str] = field(default_factory=list)
 
+    @property
+    def requirements(self) -> list[str]:
+        """The packages in requirements.txt, without comments or blank lines."""
+        path = self.source / "requirements.txt"
+        if not path.is_file():
+            return []
+        lines = (
+            line.split("#", 1)[0].strip() for line in path.read_text().splitlines()
+        )
+        return [line for line in lines if line]
+
 
 @dataclass
 class Project:
@@ -77,7 +88,7 @@ class Report:
 
     @property
     def over_limit(self) -> bool:
-        """Whether the output is bigger than Supabase's bundle limit."""
+        """Whether the output, compressed, is likely over Supabase's bundle limit."""
         return self.size > BUNDLE_LIMIT
 
 
@@ -121,6 +132,11 @@ def _function(name: str, source: Path, settings: dict) -> Function:
     if function.runtime not in runtimes.RUNTIMES:
         raise BuildError(
             f"{name}: runtime must be one of {', '.join(runtimes.RUNTIMES)}"
+        )
+    if function.requirements and function.runtime != "pyodide":
+        raise BuildError(
+            f"{name} has a requirements.txt, and packages need the pyodide runtime: "
+            f'set runtime = "pyodide" under [functions.{name}] in supie.toml'
         )
     return function
 
@@ -189,7 +205,55 @@ def _deno() -> list[str]:
     )
 
 
-def snapshot(function: Function, runtime_dir: Path) -> tuple[Path, bool]:
+def _tail(text: str, lines: int = 15) -> str:
+    """The last lines of a tool's output, where the error usually is."""
+    return "\n".join(text.strip().splitlines()[-lines:])
+
+
+def packages(function: Function, runtime_dir: Path) -> Path | None:
+    """Install requirements.txt into a zip, or reuse a cached one; None without requirements.
+
+    Pin versions in requirements.txt: an unpinned one resolves to the newest
+    release on the first build and stays cached after.
+    """
+    requirements = function.requirements
+    if not requirements:
+        return None
+    runtime = runtimes.RUNTIMES["pyodide"]
+    digest = hashlib.sha256(runtime.version.encode())
+    digest.update(_template("install_packages.ts").encode())
+    digest.update("\n".join(requirements).encode())
+    cached = runtimes.cache_dir() / "packages" / f"{digest.hexdigest()[:24]}.zip"
+    if cached.is_file():
+        return cached
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        script = work / "install_packages.ts"
+        script.write_text(_template("install_packages.ts"))
+        out = work / "packages.zip"
+        command = _deno() + [
+            "run",
+            "-A",
+            str(script),
+            str(runtime_dir),
+            runtime.cdn,
+            str(out),
+            json.dumps(requirements),
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, cwd=work)
+        if result.returncode != 0 or not out.is_file():
+            raise BuildError(
+                f"{function.name}: installing {', '.join(requirements)} failed. Packages "
+                f"must be pure Python or built by Pyodide.\n{_tail(result.stderr)}"
+            )
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(out, cached)
+    return cached
+
+
+def snapshot(
+    function: Function, runtime_dir: Path, packages_zip: Path | None = None
+) -> tuple[Path, bool]:
     """Build the Pyodide snapshot, or reuse a cached one; return it and whether it was cached."""
     runtime = runtimes.RUNTIMES["pyodide"]
     digest = hashlib.sha256(runtime.version.encode())
@@ -197,6 +261,8 @@ def snapshot(function: Function, runtime_dir: Path) -> tuple[Path, bool]:
         digest.update(resources.files("supie").joinpath(name).read_bytes())
     digest.update(_template("make_snapshot.ts").encode())
     digest.update(",".join(sorted(function.preload)).encode())
+    if packages_zip is not None:
+        digest.update(packages_zip.read_bytes())
     cached = runtimes.cache_dir() / "snapshots" / f"{digest.hexdigest()[:24]}.bin.gz"
     if cached.is_file():
         return cached, True
@@ -221,10 +287,18 @@ def snapshot(function: Function, runtime_dir: Path) -> tuple[Path, bool]:
             str(raw),
             ", ".join(function.preload),
         ]
-        result = subprocess.run(command, capture_output=True, text=True)
+        if packages_zip is not None:
+            command.append(str(packages_zip))
+        result = subprocess.run(command, capture_output=True, text=True, cwd=work)
+        if result.returncode == 3:
+            raise BuildError(
+                f"{function.name}: {_tail(result.stderr, 1)}. Remove it from preload "
+                "in supie.toml; it's imported at boot instead."
+            )
         if result.returncode != 0 or not raw.is_file():
             raise BuildError(
-                f"{function.name}: building the Pyodide snapshot failed:\n{result.stderr}"
+                f"{function.name}: building the Pyodide snapshot failed:\n"
+                f"{_tail(result.stderr)}"
             )
         cached.parent.mkdir(parents=True, exist_ok=True)
         partial = cached.with_suffix(".partial")
@@ -271,13 +345,26 @@ def build(project: Project, function: Function) -> Report:
     cached = None
     if function.runtime == "pyodide":
         (out / "compat.ts").write_text(_template("compat.ts"))
-        path, cached = snapshot(function, runtime_dir)
+        zipped = packages(function, runtime_dir)
+        if zipped is not None:
+            shutil.copy2(zipped, out / "packages.zip")
+            static.append(f"./functions/{function.name}/packages.zip")
+        path, cached = snapshot(function, runtime_dir, zipped)
         shutil.copy2(path, out / "snapshot.bin.gz")
         static.append(f"./functions/{function.name}/snapshot.bin.gz")
     _configure(project.supabase / "config.toml", function, static)
+    return Report(function, out, compressed_size(out), cached)
 
-    size = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
-    return Report(function, out, size, cached)
+
+def compressed_size(folder: Path) -> int:
+    """Roughly what Supabase counts against the bundle limit: each file gzipped."""
+    total = 0
+    for path in folder.rglob("*"):
+        if path.is_file():
+            data = path.read_bytes()
+            packed = path.suffix in {".gz", ".zip"}
+            total += len(data) if packed else len(gzip.compress(data, compresslevel=6))
+    return total
 
 
 def _configure(path: Path, function: Function, static: list[str]) -> None:

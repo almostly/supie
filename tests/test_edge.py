@@ -44,10 +44,14 @@ def edge(tmp_path_factory, images):
     (root / "supabase" / "config.toml").write_text('project_id = "edge"\n')
     for name in FUNCTIONS:
         shutil.copytree(HERE / "demo", root / "py" / name)
-    (root / "supie.toml").write_text('[functions.demo-pyodide]\nruntime = "pyodide"\n')
+    shutil.copytree(HERE / "packages", root / "py" / "packages")
+    (root / "supie.toml").write_text(
+        '[functions.demo-pyodide]\nruntime = "pyodide"\n\n'
+        '[functions.packages]\nruntime = "pyodide"\n'
+    )
     shutil.copytree(HERE / "echo", root / "supabase" / "functions" / "echo")
     project = build.load_project(root)
-    for name in FUNCTIONS:
+    for name in FUNCTIONS + ["packages"]:
         build.build(project, project.functions[name])
 
     port = _free_port()
@@ -215,3 +219,46 @@ def test_flow_mounted(edge, fn):
     state = json.loads(body)
     assert state["status"] == "succeeded", state
     assert set(state["steps"]) == {"bureau", "fraud", "score", "decide"}
+
+
+def test_packages(edge):
+    """pydantic (compiled, from Pyodide's CDN) and openpyxl (pure, from PyPI) work."""
+    rows = [{"email": "A@B.COM", "amount": "12.5"}, {"email": "nope", "amount": 3}]
+    status, _, body = call(
+        edge, "POST", "/packages/validate", {"rows": rows}, {"x-cold": "1"}
+    )
+    assert status == 200, body
+    assert json.loads(body) == {
+        "ok": [{"email": "a@b.com", "amount": 12.5}],
+        "errors": [{"row": 1, "error": "Value error, not an email"}],
+    }
+
+    import base64
+    import io
+
+    openpyxl = pytest.importorskip("openpyxl")
+    book = openpyxl.Workbook()
+    book.active.append(["email", "amount"])
+    book.active.append(["x@y.org", 7])
+    data = io.BytesIO()
+    book.save(data)
+    payload = {"workbook": base64.b64encode(data.getvalue()).decode()}
+    status, _, body = call(edge, "POST", "/packages/xlsx", payload)
+    assert status == 200, body
+    assert json.loads(body) == {
+        "ok": [{"email": "x@y.org", "amount": 7.0}],
+        "errors": [],
+    }
+
+
+def test_preloading_compiled_code_is_refused(tmp_path):
+    """A snapshot can't hold compiled extensions, so preloading pydantic fails the build."""
+    (tmp_path / "supabase").mkdir()
+    (tmp_path / "supabase" / "config.toml").write_text('project_id = "p"\n')
+    shutil.copytree(HERE / "packages", tmp_path / "py" / "pk")
+    (tmp_path / "supie.toml").write_text(
+        '[functions.pk]\nruntime = "pyodide"\npreload = ["pydantic"]\n'
+    )
+    project = build.load_project(tmp_path)
+    with pytest.raises(build.BuildError, match="compiled code"):
+        build.build(project, project.functions["pk"])

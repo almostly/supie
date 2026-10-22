@@ -30,6 +30,7 @@ Repository = "https://github.com/almostly/supie"
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "openpyxl>=3.1",  # writes the workbook the edge package test uploads
     "commitizen>=4",
 ]
 
