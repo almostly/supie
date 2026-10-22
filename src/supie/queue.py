@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from supie.app import (
     HTTPError,
+    _maybe_await,
     env,
     format_exception,
     gather,
@@ -57,15 +58,17 @@ if TYPE_CHECKING:
             ...
 
         async def once_begin(self, key: str, lease: int) -> dict[str, Any]:
-            """Claim an effect: state "run", "done" (with "result") or "busy"."""
+            """Claim an effect: state "run" (with "token"), "done" (with
+            "result") or "busy" (with "retry_after" seconds).
+            """
             ...
 
-        async def once_finish(self, key: str, result: Any) -> None:
-            """Record an effect's result."""
+        async def once_finish(self, key: str, token: str, result: Any) -> None:
+            """Record an effect's result, if token still holds its lease."""
             ...
 
-        async def once_release(self, key: str) -> None:
-            """Release a failed effect's lease."""
+        async def once_release(self, key: str, token: str) -> None:
+            """Release a failed effect's lease, if token still holds it."""
             ...
 
         async def read(
@@ -111,7 +114,14 @@ def _check_name(name: str) -> None:
 
 
 class Busy(Exception):
-    """Another delivery is running this effect right now; this attempt retries later."""
+    """Another delivery is running this effect right now; this attempt retries
+    once its lease ends, without counting as a failure.
+    """
+
+    def __init__(self, key: str, retry_after: int) -> None:
+        """Name the effect and the seconds left on its lease."""
+        super().__init__(key + " is being run by another delivery")
+        self.retry_after = retry_after
 
 
 class QueueContext:
@@ -146,28 +156,39 @@ class QueueContext:
         """Run fn at most once per key, and return its result on every delivery.
 
         The first delivery runs fn and stores its (JSON) result; repeats get the
-        stored result without running fn. While fn runs, the key holds a lease
-        (the queue's visibility by default): another delivery arriving then
-        raises Busy and retries later. If fn raises, the lease is released so a
-        retry can run it. If the worker dies after fn but before its result is
-        stored, the next delivery runs fn again, so effects outside the database
-        should still tolerate a rare repeat.
+        stored result without running fn. While fn runs, the key holds a lease:
+        another delivery arriving then raises Busy and comes back when the lease
+        ends. Keep the lease above fn's longest run; by default it's five times
+        the queue's visibility, or the consumer timeout if that's longer. If fn
+        raises or is cancelled, the lease is released so a retry can run it. A
+        result that isn't JSON is stored as None and fails the attempt. If
+        the worker dies after fn but before its result is stored, the next
+        delivery runs fn again, so effects outside the database should still
+        tolerate a rare repeat.
         """
         backend = self.queue._backend()
-        claim = await backend.once_begin(key, lease or self.queue.visibility)
+        if lease is None:
+            lease = max(5 * self.queue.visibility, int(self.queue.timeout or 0) + 1)
+        claim = await backend.once_begin(key, lease)
         if claim["state"] == "done":
             return claim.get("result")
         if claim["state"] == "busy":
-            raise Busy(key + " is being run by another delivery")
+            raise Busy(key, int(claim["retry_after"]))
+        token = str(claim["token"])
         try:
-            result = fn()
-            if hasattr(result, "send"):
-                result = await result
-        except Exception:
-            await backend.once_release(key)
+            result = await _maybe_await(fn())
+        except BaseException:
+            await backend.once_release(key, token)
             raise
-        result = json.loads(json.dumps(result))
-        await backend.once_finish(key, result)
+        try:
+            result = json.loads(json.dumps(result))
+        except (TypeError, ValueError):
+            # fn's effect happened: record it so a retry doesn't repeat it
+            await backend.once_finish(key, token, None)
+            raise TypeError(
+                key + ": fn ran, but its result isn't JSON, so repeats get None"
+            )
+        await backend.once_finish(key, token, result)
         return result
 
 
@@ -288,6 +309,9 @@ class Queue:
                     await wait_for(result, self.timeout)
                 else:
                     await result
+        except Busy as busy:
+            await backend.retry(ctx.msg_id, busy.retry_after)
+            return "retried"
         except Exception as error:
             if attempt >= self.max_attempts:
                 await backend.kill(ctx.msg_id, format_exception(error)[-4000:])
@@ -390,18 +414,20 @@ class SupabaseQueue:
         )
         return dict(result.data)
 
-    async def once_finish(self, key: str, result: Any) -> None:
+    async def once_finish(self, key: str, token: str, result: Any) -> None:
         """Record an effect's result."""
         db = await self._db()
         await db.rpc(
             "supie_queue_once_finish",
-            {"queue": self.name, "key": key, "result": result},
+            {"queue": self.name, "key": key, "token": token, "result": result},
         )
 
-    async def once_release(self, key: str) -> None:
+    async def once_release(self, key: str, token: str) -> None:
         """Release a failed effect's lease."""
         db = await self._db()
-        await db.rpc("supie_queue_once_release", {"queue": self.name, "key": key})
+        await db.rpc(
+            "supie_queue_once_release", {"queue": self.name, "key": key, "token": token}
+        )
 
     async def read(
         self, visibility: int, qty: int, poll_seconds: int
@@ -463,10 +489,11 @@ class MemoryQueue:
         self.done: dict[str, dict[str, Any]] = {}
         self._next = 0
         self._next_dead = 0
+        self._next_token = 0
         self.total_sent = 0
 
     async def send(
-        self, messages: list[Any], delay: int, keys: list[str | None] | None = None
+        self, messages: list[Any], delay: int, keys: list[str | None] | None
     ) -> list[int]:
         """Enqueue messages, once per key."""
         ids = []
@@ -492,21 +519,32 @@ class MemoryQueue:
         """Claim an effect."""
         entry = self.done.get(key)
         now = _now()
-        expired = entry is not None and entry["status"] == "running"
-        if entry is None or (expired and entry["lease_until"] <= now):
-            self.done[key] = {"status": "running", "lease_until": now + lease}
-            return {"state": "run"}
-        if entry["status"] == "done":
+        if entry is not None and entry["status"] == "done":
             return {"state": "done", "result": entry["result"]}
-        return {"state": "busy"}
+        if entry is not None and entry["lease_until"] > now:
+            return {"state": "busy", "retry_after": int(entry["lease_until"] - now) + 1}
+        self._next_token += 1
+        token = str(self._next_token)
+        self.done[key] = {
+            "status": "running",
+            "lease_until": now + lease,
+            "token": token,
+        }
+        return {"state": "run", "token": token}
 
-    async def once_finish(self, key: str, result: Any) -> None:
+    def _holds(self, key: str, token: str) -> bool:
+        """Whether token holds key's running lease."""
+        entry = self.done.get(key, {})
+        return entry.get("status") == "running" and entry.get("token") == token
+
+    async def once_finish(self, key: str, token: str, result: Any) -> None:
         """Record an effect's result."""
-        self.done[key] = {"status": "done", "result": result}
+        if self._holds(key, token):
+            self.done[key] = {"status": "done", "result": result}
 
-    async def once_release(self, key: str) -> None:
+    async def once_release(self, key: str, token: str) -> None:
         """Release a failed effect's lease."""
-        if self.done.get(key, {}).get("status") == "running":
+        if self._holds(key, token):
             self.done[key]["lease_until"] = _now()
 
     async def read(
@@ -542,12 +580,18 @@ class MemoryQueue:
     async def kill(self, msg_id: int, error: str) -> int:
         """Move a message to the dead letters."""
         entry = self.messages.pop(msg_id)
+        key = None
+        for k in list(self.keys):
+            if self.keys[k] == msg_id:
+                del self.keys[k]
+                key = k
         self._next_dead += 1
         self.dead[self._next_dead] = {
             "msg_id": msg_id,
             "message": entry["message"],
             "error": error,
             "attempts": entry["attempt"],
+            "key": key,
         }
         return self._next_dead
 
@@ -556,7 +600,7 @@ class MemoryQueue:
         entry = self.dead.pop(dead_id, None)
         if entry is None:
             return None
-        return (await self.send([entry["message"]], 0, None))[0]
+        return (await self.send([entry["message"]], 0, [entry["key"]]))[0]
 
     async def stats(self) -> dict[str, Any]:
         """Queue metrics."""

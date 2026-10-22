@@ -209,6 +209,28 @@ def test_send_keys_enqueue_once():
         run(queue.send_batch([{}, {}], keys=["only-one"]))
 
 
+def test_a_dead_letter_takes_its_key_along():
+    """A resend after the message died enqueues it again; replaying then adds nothing."""
+    queue = Queue("keyed_dead", MemoryQueue())
+
+    @queue.consumer(max_attempts=1)
+    async def handle(ctx, message):
+        """Always fail."""
+        raise RuntimeError("down")
+
+    async def go():
+        """Send, let it die, resend with the key, then replay the dead letter."""
+        first = await queue.send({"a": 1}, key="k")
+        await queue.work(seconds=5, idle_polls=2)
+        again = await queue.send({"a": 1}, key="k")
+        replayed = await queue.replay(1)
+        return first, again, replayed, await queue.stats()
+
+    first, again, replayed, stats = run(go())
+    assert again != first and replayed == again
+    assert stats["length"] == 1 and stats["dead"] == 0
+
+
 def test_once_survives_a_crash_after_the_effect():
     """The effect ran, then the handler crashed before ack: the redelivery doesn't repeat it."""
     queue = Queue("crashy", MemoryQueue())
@@ -265,12 +287,14 @@ def test_once_retries_a_failed_effect():
 
 
 def test_once_makes_concurrent_deliveries_wait():
-    """Two deliveries of the same effect at once: one runs it, the other waits, then reuses it."""
+    """Two deliveries of the same effect at once: one runs it, the other waits
+    for the lease without using up an attempt, then reuses the result.
+    """
     queue = Queue("racing", MemoryQueue())
     effects = []
     results = []
 
-    @queue.consumer(batch=10, max_attempts=5, backoff=0.2)
+    @queue.consumer(batch=10, max_attempts=1)
     async def handle(ctx, message):
         """Both messages share one effect key."""
 
@@ -280,13 +304,88 @@ def test_once_makes_concurrent_deliveries_wait():
             await sleep(0.3)
             return "done once"
 
-        results.append(await ctx.once("shared", effect, lease=5))
+        results.append(await ctx.once("shared", effect, lease=1))
 
     async def go():
-        """Two messages in one batch."""
+        """Two messages in one batch, then the waiting one after the lease."""
         await queue.send_batch([{"n": 1}, {"n": 2}])
-        return await queue.work(seconds=5, idle_polls=3)
+        first = await queue.work(seconds=5, idle_polls=3)
+        await sleep(1.1)
+        return first, await queue.work(seconds=5, idle_polls=3)
 
-    counts = run(go())
-    assert counts == {"handled": 2, "retried": 1, "dead": 0}
+    first, second = run(go())
+    assert first == {"handled": 1, "retried": 1, "dead": 0}
+    assert second == {"handled": 1, "retried": 0, "dead": 0}
     assert len(effects) == 1 and results == ["done once", "done once"]
+
+
+def test_once_doesnt_repeat_an_effect_whose_result_isnt_json():
+    """The effect ran but its result can't be stored: the attempt fails, the retry doesn't rerun it."""
+    queue = Queue("odd_result", MemoryQueue())
+    effects = []
+    results = []
+
+    @queue.consumer(max_attempts=3, backoff=0)
+    async def handle(ctx, message):
+        """The effect returns something JSON can't hold."""
+
+        def effect():
+            """The effect."""
+            effects.append(ctx.attempt)
+            return object()
+
+        results.append(await ctx.once("odd:1", effect))
+
+    async def go():
+        """One message, worked until done."""
+        await queue.send({})
+        return await queue.work(seconds=5, idle_polls=2)
+
+    assert run(go()) == {"handled": 1, "retried": 1, "dead": 0}
+    assert effects == [1] and results == [None]
+
+
+def test_once_ignores_a_runner_whose_lease_ran_out():
+    """A runner that lost its lease can't release or finish the one that took over."""
+    backend = MemoryQueue()
+
+    async def go():
+        """A's lease runs out, B takes over, then A reports late."""
+        a = await backend.once_begin("k", 0)
+        b = await backend.once_begin("k", 60)
+        await backend.once_release("k", a["token"])
+        during = await backend.once_begin("k", 60)
+        await backend.once_finish("k", a["token"], "from a")
+        await backend.once_finish("k", b["token"], "from b")
+        return during, await backend.once_begin("k", 60)
+
+    during, after = run(go())
+    assert during["state"] == "busy"
+    assert after == {"state": "done", "result": "from b"}
+
+
+def test_once_releases_the_lease_when_cancelled():
+    """A handler cut off by the consumer timeout frees the key for the retry."""
+    queue = Queue("slow_effect", MemoryQueue())
+    attempts = []
+
+    @queue.consumer(max_attempts=3, backoff=0, timeout=0.1)
+    async def handle(ctx, message):
+        """The first attempt hangs past the timeout."""
+
+        async def effect():
+            """The effect."""
+            attempts.append(ctx.attempt)
+            if ctx.attempt == 1:
+                await sleep(5)
+            return "ok"
+
+        assert await ctx.once("slow:1", effect) == "ok"
+
+    async def go():
+        """One message, worked until done."""
+        await queue.send({})
+        return await queue.work(seconds=5, idle_polls=2)
+
+    assert run(go()) == {"handled": 1, "retried": 1, "dead": 0}
+    assert attempts == [1, 2]

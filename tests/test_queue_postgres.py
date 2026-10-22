@@ -174,7 +174,9 @@ def test_queue_in_the_edge_runtime(rest, edge_queue, fn, queue_name):
             break
         time.sleep(0.5)
     assert (left, dead) == ("0", "1"), logs(container)
-    error = psql(db, f"select error from supie_queue_dead where queue = '{queue_name}'")
+    error, dead_key = psql(
+        db, f"select error, key from supie_queue_dead where queue = '{queue_name}'"
+    ).rsplit("|", 1)
     assert "application 5 is invalid" in error
     sent = psql(
         db, f"select count(*) from supie_queue_keys where queue = '{queue_name}'"
@@ -183,7 +185,7 @@ def test_queue_in_the_edge_runtime(rest, edge_queue, fn, queue_name):
         db,
         f"select count(*) from supie_queue_once where queue = '{queue_name}' and status = 'done'",
     )
-    assert (sent, decided) == ("6", "5")
+    assert (sent, dead_key, decided) == ("5", "application-5", "5")
     stats = urllib.request.Request(
         f"{base}/{fn}/queue/stats", headers={"Authorization": f"Bearer {SERVICE}"}
     )
@@ -280,3 +282,59 @@ def test_once_across_two_workers_and_a_redelivery(rest):
         == "done|1"
     )
     assert psql(db, "select count(*) from pgmq.q_pg_once") == "0"
+
+
+def test_batches_with_keys_in_opposite_orders_dont_deadlock(rest):
+    """Two sends share keys in opposite orders while a third holds one of them."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from stack import docker
+
+    _, db = rest
+    psql(db, "select public.supie_queue_create('pg_overlap')")
+    hold = (
+        "begin; insert into public.supie_queue_keys (queue, key) values ('pg_overlap', 'c');"
+        " select pg_sleep(2); rollback;"
+    )
+
+    def send(keys):
+        """One client's batch, straight at the database."""
+        sql = (
+            "select public.supie_queue_send('pg_overlap', '[{}, {}, {}]', 0,"
+            f" '{json.dumps(keys)}')"
+        )
+        args = ["exec", db, "psql", "-U", "postgres", "-h", "localhost", "-tAc", sql]
+        return docker(*args).stdout.strip()
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        held = pool.submit(psql, db, hold)
+        time.sleep(0.5)  # the hold has key c before either batch starts
+        ids = list(pool.map(send, [["a", "c", "b"], ["b", "c", "a"]]))
+        held.result()
+    first = ids[0].strip("{}").split(",")
+    second = ids[1].strip("{}").split(",")
+    assert first == second[::-1], ids
+    assert psql(db, "select count(*) from pgmq.q_pg_overlap") == "3"
+
+
+def test_keys_follow_dead_letters_and_replays(rest):
+    """A resend after the message died enqueues it again; replaying then adds nothing."""
+    base, db = rest
+    queue = Queue("pg_keyed_dead")
+
+    @queue.consumer(max_attempts=1)
+    def handle(ctx, message):
+        """Always fail."""
+        raise RuntimeError("down")
+
+    async def go():
+        """Send, let it die, then resend with the key."""
+        first = await queue.send({"a": 1}, key="k")
+        await queue.work(seconds=10, idle_polls=2)
+        return first, await queue.send({"a": 1}, key="k")
+
+    first, again = on_pgmq(base, go())
+    assert again != first
+    dead = psql(db, "select id from supie_queue_dead where queue = 'pg_keyed_dead'")
+    assert on_pgmq(base, queue.replay(int(dead))) == again
+    assert psql(db, "select count(*) from pgmq.q_pg_keyed_dead") == "1"

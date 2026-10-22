@@ -16,15 +16,19 @@ create table if not exists public.supie_queue_dead (
   error text,
   attempts integer not null,
   enqueued_at timestamptz,
-  failed_at timestamptz not null default now()
+  failed_at timestamptz not null default now(),
+  key text
 );
 create index if not exists supie_queue_dead_queue on public.supie_queue_dead (queue, failed_at);
+alter table public.supie_queue_dead add column if not exists key text;
 alter table public.supie_queue_dead enable row level security;
 revoke all on public.supie_queue_dead from anon, authenticated;
 grant select, insert, delete on public.supie_queue_dead to service_role;
 
 -- Idempotency keys for sends: a key is enqueued once per queue; sending it
--- again returns the first message's ID. Delete old keys on a schedule, e.g.
+-- again returns the first message's ID. A message that goes to the dead
+-- letters takes its key along, so a resend enqueues it again; a replay brings
+-- the key back. Delete old keys on a schedule, e.g.
 -- delete from public.supie_queue_keys where created_at < now() - interval '7 days'.
 create table if not exists public.supie_queue_keys (
   queue text not null,
@@ -33,21 +37,26 @@ create table if not exists public.supie_queue_keys (
   created_at timestamptz not null default now(),
   primary key (queue, key)
 );
+create index if not exists supie_queue_keys_msg on public.supie_queue_keys (queue, msg_id);
 alter table public.supie_queue_keys enable row level security;
 revoke all on public.supie_queue_keys from anon, authenticated;
 grant select, insert, update, delete on public.supie_queue_keys to service_role;
 
 -- Effects a consumer ran once (ctx.once): running under a lease, or done with
--- their result. Delete old rows on a schedule, as for the keys.
+-- their result. token names the lease's holder, so a runner whose lease ran out
+-- can't finish or release the one that took over. Delete old rows on a
+-- schedule, as for the keys.
 create table if not exists public.supie_queue_once (
   queue text not null,
   key text not null,
   status text not null check (status in ('running', 'done')),
   result jsonb,
   lease_until timestamptz,
+  token text,
   updated_at timestamptz not null default now(),
   primary key (queue, key)
 );
+alter table public.supie_queue_once add column if not exists token text;
 alter table public.supie_queue_once enable row level security;
 revoke all on public.supie_queue_once from anon, authenticated;
 grant select, insert, update, delete on public.supie_queue_once to service_role;
@@ -83,28 +92,39 @@ set search_path = ''
 as $$
 declare
   v_ids bigint[] := '{}';
+  v_new text[] := '{}';
   v_key text;
   v_id bigint;
-  v_new boolean;
 begin
+  if keys is null then
+    return array(
+      select pgmq.send_batch(queue, array(select jsonb_array_elements(messages)), delay)
+    );
+  end if;
+  -- claim the keys first, in sorted order, so concurrent sends with
+  -- overlapping keys wait on each other instead of deadlocking; a key a
+  -- concurrent send holds makes this one wait, then find it taken
+  for v_key in
+    select distinct k from jsonb_array_elements_text(keys) as k where k is not null order by k
+  loop
+    insert into public.supie_queue_keys (queue, key) values (queue, v_key)
+    on conflict do nothing;
+    if found then
+      v_new := v_new || v_key;
+    end if;
+  end loop;
   for i in 0 .. jsonb_array_length(messages) - 1 loop
     v_key := keys ->> i;
-    if v_key is null then
+    if v_key is null or v_key = any(v_new) then
       select pgmq.send(queue, messages -> i, delay) into v_id;
-    else
-      -- the unique key makes a concurrent send with the same key wait here,
-      -- then find this row instead of sending a second message
-      insert into public.supie_queue_keys (queue, key) values (queue, v_key)
-      on conflict do nothing
-      returning true into v_new;
-      if v_new then
-        select pgmq.send(queue, messages -> i, delay) into v_id;
-        update public.supie_queue_keys as k set msg_id = v_id
-        where k.queue = supie_queue_send.queue and k.key = v_key;
-      else
-        select k.msg_id into v_id from public.supie_queue_keys as k
-        where k.queue = supie_queue_send.queue and k.key = v_key;
-      end if;
+    end if;
+    if v_key = any(v_new) then
+      update public.supie_queue_keys as k set msg_id = v_id
+      where k.queue = supie_queue_send.queue and k.key = v_key;
+      v_new := array_remove(v_new, v_key);
+    elsif v_key is not null then
+      select k.msg_id into v_id from public.supie_queue_keys as k
+      where k.queue = supie_queue_send.queue and k.key = v_key;
     end if;
     v_ids := v_ids || v_id;
   end loop;
@@ -112,9 +132,9 @@ begin
 end
 $$;
 
--- Start an effect for ctx.once: 'run' when this caller should run it (now
--- holding a lease), 'done' with the stored result, or 'busy' while another
--- caller's lease is live.
+-- Start an effect for ctx.once: 'run' with a token when this caller should run
+-- it (now holding a lease), 'done' with the stored result, or 'busy' with the
+-- seconds left on another caller's live lease.
 create or replace function public.supie_queue_once_begin(
   queue text, key text, lease_seconds integer
 )
@@ -125,13 +145,14 @@ set search_path = ''
 as $$
 declare
   v_row public.supie_queue_once;
+  v_token text := gen_random_uuid()::text;
 begin
-  insert into public.supie_queue_once (queue, key, status, lease_until)
-  values (queue, key, 'running', now() + make_interval(secs => lease_seconds))
+  insert into public.supie_queue_once (queue, key, status, lease_until, token)
+  values (queue, key, 'running', now() + make_interval(secs => lease_seconds), v_token)
   on conflict do nothing
   returning * into v_row;
   if v_row.key is not null then
-    return jsonb_build_object('state', 'run');
+    return jsonb_build_object('state', 'run', 'token', v_token);
   end if;
   select * into v_row from public.supie_queue_once as o
   where o.queue = supie_queue_once_begin.queue and o.key = supie_queue_once_begin.key
@@ -140,19 +161,23 @@ begin
     return jsonb_build_object('state', 'done', 'result', v_row.result);
   end if;
   if v_row.lease_until > now() then
-    return jsonb_build_object('state', 'busy');
+    return jsonb_build_object(
+      'state', 'busy', 'retry_after', ceil(extract(epoch from v_row.lease_until - now()))::integer
+    );
   end if;
   -- the last runner's lease ran out (it died, or released it): take over
   update public.supie_queue_once as o
-  set lease_until = now() + make_interval(secs => lease_seconds), updated_at = now()
+  set lease_until = now() + make_interval(secs => lease_seconds), token = v_token, updated_at = now()
   where o.queue = supie_queue_once_begin.queue and o.key = supie_queue_once_begin.key;
-  return jsonb_build_object('state', 'run');
+  return jsonb_build_object('state', 'run', 'token', v_token);
 end
 $$;
 
--- The effect succeeded: keep its result for any repeat.
+-- The effect succeeded: keep its result for any repeat, if this caller still
+-- holds the lease.
+drop function if exists public.supie_queue_once_finish(text, text, jsonb);
 create or replace function public.supie_queue_once_finish(
-  queue text, key text, result jsonb
+  queue text, key text, token text, result jsonb
 )
 returns void
 language sql
@@ -161,11 +186,16 @@ set search_path = ''
 as $$
   update public.supie_queue_once as o
   set status = 'done', result = supie_queue_once_finish.result, lease_until = null, updated_at = now()
-  where o.queue = supie_queue_once_finish.queue and o.key = supie_queue_once_finish.key
+  where o.queue = supie_queue_once_finish.queue
+    and o.key = supie_queue_once_finish.key
+    and o.status = 'running'
+    and o.token = supie_queue_once_finish.token
 $$;
 
--- The effect raised: release the lease so a retry can run it.
-create or replace function public.supie_queue_once_release(queue text, key text)
+-- The effect raised: release the lease so a retry can run it, if this caller
+-- still holds it.
+drop function if exists public.supie_queue_once_release(text, text);
+create or replace function public.supie_queue_once_release(queue text, key text, token text)
 returns void
 language sql
 security definer
@@ -176,6 +206,7 @@ as $$
   where o.queue = supie_queue_once_release.queue
     and o.key = supie_queue_once_release.key
     and o.status = 'running'
+    and o.token = supie_queue_once_release.token
 $$;
 
 -- Read up to qty messages, waiting up to max_poll_seconds for the first; each
@@ -233,14 +264,18 @@ set search_path = ''
 as $$
 declare
   v_dead_id bigint;
+  v_key text;
 begin
+  delete from public.supie_queue_keys as k
+  where k.queue = supie_queue_kill.queue and k.msg_id = supie_queue_kill.msg_id
+  returning k.key into v_key;
   execute format(
-    'insert into public.supie_queue_dead (queue, msg_id, message, error, attempts, enqueued_at)
-     select $1, m.msg_id, m.message, $3, m.read_ct, m.enqueued_at
+    'insert into public.supie_queue_dead (queue, msg_id, message, error, attempts, enqueued_at, key)
+     select $1, m.msg_id, m.message, $3, m.read_ct, m.enqueued_at, $4
      from pgmq.%I as m where m.msg_id = $2
      returning id',
     'q_' || queue
-  ) into v_dead_id using queue, msg_id, error;
+  ) into v_dead_id using queue, msg_id, error, v_key;
   perform pgmq.delete(queue, msg_id);
   return v_dead_id;
 end
@@ -261,7 +296,11 @@ begin
   if v_dead.id is null then
     return null;
   end if;
-  select pgmq.send(v_dead.queue, v_dead.message) into v_msg_id;
+  -- with its key back: a resend made since the kill is already queued, so
+  -- the replay returns that message instead of sending a second one
+  select (public.supie_queue_send(
+    v_dead.queue, jsonb_build_array(v_dead.message), 0, jsonb_build_array(v_dead.key)
+  ))[1] into v_msg_id;
   return v_msg_id;
 end
 $$;
@@ -291,8 +330,8 @@ begin
     'supie_queue_create(text)',
     'supie_queue_send(text, jsonb, integer, jsonb)',
     'supie_queue_once_begin(text, text, integer)',
-    'supie_queue_once_finish(text, text, jsonb)',
-    'supie_queue_once_release(text, text)',
+    'supie_queue_once_finish(text, text, text, jsonb)',
+    'supie_queue_once_release(text, text, text)',
     'supie_queue_read(text, integer, integer, integer)',
     'supie_queue_ack(text, bigint)',
     'supie_queue_retry(text, bigint, integer)',

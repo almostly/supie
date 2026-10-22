@@ -33,6 +33,19 @@ Handling a request costs about the same as TypeScript. Heavy computation does no
 
 The [prototype](prototype/) has the full measurements.
 
+### How reliable is it?
+
+A one-hour soak on hosted Supabase (eu-west-1, MicroPython, 2026-10-22), from a client in Europe: steady traffic of one inline scoring request and one queued application per second, a burst of 30 of each every 5 minutes, and one queued application in ten sent twice as a client retry.
+
+| | requests | succeeded | p50 | p90 | p99 |
+|---|---|---|---|---|---|
+| inline scoring | 3,916 | 99.95% | 0.31 s | 2.2 s | 3.8 s |
+| queued application | 4,258 | 99.77% | 0.53 s | 2.8 s | 4.3 s |
+
+- **No server errors.** All 12 failures were connection-level (a reset or an early end of the TLS stream), none an HTTP 5xx from the function.
+- **Nothing lost, nothing doubled.** Every one of 3,916 applications was accepted after at most three client retries, and each ended exactly once: 3,837 decided once, 79 in the dead letters as designed. The 334 duplicate sends and 10 retries added no messages.
+- **The tail is slow.** One request in ten took over 2 s, and a few over 10 s, in steady traffic rather than in bursts. Clients should use timeouts and retries, which the queue's send keys make safe.
+
 ## Install
 
 ```bash
@@ -349,8 +362,8 @@ async def handle(ctx, message):
     await ctx.once(f"decide:{message['id']}", lambda: decide(message))
 ```
 
-- **Send keys.** A message is enqueued once per key. A client that got no 202 can safely send again: the same key returns the first message's ID and enqueues nothing, even when the retries race each other.
-- **`ctx.once(key, fn)`.** Runs `fn` once per key and stores its JSON result; any later delivery gets the stored result without running `fn`. While `fn` runs, the key holds a lease, so a delivery arriving meanwhile retries later instead of running it in parallel. If `fn` raises, the lease is released and a retry runs it.
+- **Send keys.** A message is enqueued once per key. A client that got no 202 can safely send again: the same key returns the first message's ID and enqueues nothing, even when the retries race each other. A message that goes to the dead letters takes its key along, so sending the key again enqueues it afresh, and replaying the dead letter then returns that message instead of adding a second.
+- **`ctx.once(key, fn)`.** Runs `fn` once per key and stores its JSON result; any later delivery gets the stored result without running `fn`. While `fn` runs, the key holds a lease (`lease=`, five times the visibility by default; keep it above `fn`'s longest run), so a delivery arriving meanwhile comes back when the lease ends instead of running it in parallel, without using up an attempt. If `fn` raises or is cancelled, the lease is released and a retry runs it; a runner whose lease ran out can't release or finish the one that took over.
 - **The one gap.** If a worker dies after `fn` finished but before its result was stored, the next delivery runs `fn` again. That can't be closed for effects outside the database (an email, a payment API), so give those their own idempotency key where the API offers one.
 
 Tested with forced duplicates: a crash after the effect, a failed effect, concurrent deliveries of one effect, a message redelivered to a second worker mid-effect, and racing retries of one send, on pgmq and in the Edge Runtime on both runtimes. Keys and results stay in `supie_queue_keys` and `supie_queue_once`; delete old rows on a schedule.
