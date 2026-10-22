@@ -50,6 +50,9 @@ def edge(tmp_path_factory, images):
         '[functions.packages]\nruntime = "pyodide"\n'
     )
     shutil.copytree(HERE / "echo", root / "supabase" / "functions" / "echo")
+    from conftest import tiny_model
+
+    (root / "supabase" / "functions" / "echo" / "model.onnx").write_bytes(tiny_model())
     project = build.load_project(root)
     for name in FUNCTIONS + ["packages"]:
         build.build(project, project.functions[name])
@@ -269,3 +272,17 @@ def test_preloading_compiled_code_is_refused(tmp_path):
     project = build.load_project(tmp_path)
     with pytest.raises(build.BuildError, match="compiled code"):
         build.build(project, project.functions["pk"])
+
+
+@pytest.mark.parametrize("fn", FUNCTIONS)
+def test_onnx_model_from_storage(edge, fn):
+    """A model loads from Storage and runs in the runtime's ONNX engine."""
+    import math
+
+    rows = [[0.0, 0.0], [1.0, 0.5], [-1.0, 2.0]]
+    status, _, body = call(edge, "POST", f"/{fn}/model", {"rows": rows})
+    assert status == 200, body
+    result = json.loads(body)
+    want = [1 / (1 + math.exp(-(2 * a - 3 * b + 0.5))) for a, b in rows]
+    assert result["inputs"] == ["features"]
+    assert result["pd"] == pytest.approx(want, abs=1e-6)

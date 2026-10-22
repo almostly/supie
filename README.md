@@ -110,6 +110,48 @@ data = await req.supabase_admin.storage.from_("models").download("scorecard.json
 
 The query builder covers `select`, `insert`, `upsert`, `update`, `delete`, the filters `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `is_` and `in_`, plus `filter`, `order`, `limit`, `offset` and `single`. A failed call raises `supie.supabase.SupabaseError` with the status and message.
 
+## Models
+
+Supabase's Edge Runtime has a native ONNX engine built in. supie gives Python handlers access to it, so a model scores outside WebAssembly, at native speed:
+
+```python
+from supie import App, Request
+from supie.onnx import Model
+
+app = App()
+FEATURES = ["age", "income", "dti", "utilization", "delinquencies"]
+
+
+@app.on_boot
+async def setup():
+    app.state.model = await Model.from_storage("models", "pd/v1.onnx")  # a private bucket
+
+
+@app.post("/")
+async def score(req: Request):
+    applicant = req.json()
+    out = await app.state.model.run({"features": [[applicant[f] for f in FEATURES]]})
+    return {"pd": out["probabilities"][0][1]}
+```
+
+`Model.from_storage` downloads the model as the service role, unless you pass a client. `Model.from_url(url, headers)` loads one from anywhere else. `run` takes nested lists of float32, or `{"data": ..., "type": "int64"}` for other types, and returns nested lists by output name. Under CPython, as in tests, models run with the `onnxruntime` package, and the test client's `fetch` serves the model file.
+
+Classifier exports from CatBoost, scikit-learn and others end in a ZipMap, which the engine can't return. Remove it before uploading:
+
+```bash
+pip install 'supie[models]'
+supie model prepare pd.onnx pd-prepared.onnx
+```
+
+A CatBoost model of 1.6 MB, from a private bucket on hosted Supabase:
+
+| | |
+|---|---|
+| 500 holdout rows | 1.8 s end to end, largest difference from native CatBoost 2.4e-7 |
+| one applicant, 20 requests | median 0.53 s end to end, each on a fresh worker |
+
+On a fresh worker, about 0.3 s of that is downloading the model from Storage. A gradient-boosted model scores a row in about 0.1 ms.
+
 ## Workflows
 
 A `Flow` chains steps, like AWS Step Functions over your edge functions. Steps run as soon as their dependencies are done, so independent ones run in parallel. Every finished step is saved, so a run can resume where it stopped, and the saved steps double as an audit trail.

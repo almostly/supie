@@ -55,6 +55,64 @@ Object.assign(host, {
   uuid: () => crypto.randomUUID().replaceAll("-", ""),
 });
 
+// ONNX models for supie.onnx, run by the runtime's built-in ONNX engine.
+// Python sends inputs as JSON nested lists and gets JSON nested lists back.
+type OnnxSession = {
+  inputNames: string[];
+  outputNames: string[];
+  run(feeds: Record<string, unknown>): Promise<Record<string, OnnxTensor>>;
+};
+type OnnxTensor = { type: string; dims: number[]; data: ArrayLike<number | bigint> };
+const ort = (globalThis as Record<symbol, any>)[Symbol.for("onnxruntime")];
+const sessions: OnnxSession[] = [];
+const ARRAYS: Record<string, (data: number[]) => ArrayLike<number | bigint>> = {
+  float32: (d) => Float32Array.from(d),
+  float64: (d) => Float64Array.from(d),
+  int32: (d) => Int32Array.from(d),
+  int64: (d) => BigInt64Array.from(d, (v) => BigInt(Math.trunc(v))),
+  bool: (d) => Uint8Array.from(d),
+};
+const shapeOf = (value: unknown): number[] =>
+  Array.isArray(value) ? [value.length, ...shapeOf(value[0])] : [];
+const nest = (flat: (number | boolean)[], dims: number[]): unknown => {
+  if (dims.length <= 1) return flat;
+  const size = dims.slice(1).reduce((a, b) => a * b, 1);
+  return Array.from({ length: dims[0] }, (_, i) => nest(flat.slice(i * size, (i + 1) * size), dims.slice(1)));
+};
+Object.assign(host, {
+  onnx_load: async (url: string, headersJson: string) => {
+    if (!ort) throw new Error("this Edge Runtime has no built-in ONNX engine");
+    const response = await fetch(url, { headers: JSON.parse(headersJson) });
+    if (!response.ok) throw new Error(`loading ${url}: HTTP ${response.status}`);
+    const session = await ort.InferenceSession.create(new Uint8Array(await response.arrayBuffer()));
+    sessions.push(session);
+    return JSON.stringify({
+      handle: sessions.length - 1,
+      inputs: session.inputNames,
+      outputs: session.outputNames,
+    });
+  },
+  onnx_run: async (handle: number, inputsJson: string) => {
+    const feeds: Record<string, unknown> = {};
+    for (const [name, spec] of Object.entries(JSON.parse(inputsJson) as Record<string, { data: unknown; type: string }>)) {
+      const make = ARRAYS[spec.type];
+      if (!make) throw new Error(`unsupported ONNX input type: ${spec.type}`);
+      const dims = shapeOf(spec.data);
+      const flat = (Array.isArray(spec.data) ? spec.data.flat(Infinity) : [spec.data]) as number[];
+      feeds[name] = new ort.Tensor(spec.type, make(flat), dims);
+    }
+    const results = await sessions[handle].run(feeds);
+    const out: Record<string, unknown> = {};
+    for (const [name, tensor] of Object.entries(results)) {
+      const flat = Array.from(tensor.data as ArrayLike<number | bigint>, (v) =>
+        typeof v === "bigint" ? Number(v) : v
+      );
+      out[name] = nest(flat, tensor.dims);
+    }
+    return JSON.stringify(out);
+  },
+});
+
 const t0 = performance.now();
 const py = await loadPython(here);
 py.registerJsModule("_supie_host", host);

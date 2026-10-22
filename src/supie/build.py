@@ -35,7 +35,7 @@ SKIP_DIRS = {
     "node_modules",
 }
 SKIP_FILES = {"conftest.py", "requirements.txt", "supie.toml"}
-RUNTIME_MODULES = ("__init__.py", "app.py", "supabase.py", "flow.py")
+RUNTIME_MODULES = ("__init__.py", "app.py", "supabase.py", "flow.py", "onnx.py")
 STUBS = ("typing.py", "__future__.py")  # for MicroPython, which lacks both
 DENO = "deno@2.9.6"
 

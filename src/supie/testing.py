@@ -68,6 +68,7 @@ class FakeHost:
         self.handler = fetch
         self.calls: list[Call] = []
         self.sleep_scale = 1.0
+        self.sessions: list[Any] = []
 
     def env(self, name: str) -> str | None:
         """Return an environment variable, or None."""
@@ -91,6 +92,50 @@ class FakeHost:
     def uuid(self) -> str:
         """A random hex ID."""
         return uuid.uuid4().hex
+
+    async def onnx_load(self, url: str, headers_json: str) -> str:
+        """Fetch a model through the fake fetch and load it with onnxruntime."""
+        try:
+            import onnxruntime
+        except ImportError as error:
+            raise RuntimeError(
+                "testing ONNX models under CPython needs onnxruntime: "
+                "pip install onnxruntime"
+            ) from error
+        call = Call("GET", url, jsonlib.loads(headers_json), None)
+        self.calls.append(call)
+        response = self.handler(call) if self.handler else FakeResponse("", 404)
+        if response.status >= 400:
+            raise RuntimeError(f"loading {url}: HTTP {response.status}")
+        data = (
+            response.body
+            if isinstance(response.body, bytes)
+            else response.body.encode()
+        )
+        session = onnxruntime.InferenceSession(data)
+        self.sessions.append(session)
+        return jsonlib.dumps(
+            {
+                "handle": len(self.sessions) - 1,
+                "inputs": [i.name for i in session.get_inputs()],
+                "outputs": [o.name for o in session.get_outputs()],
+            }
+        )
+
+    async def onnx_run(self, handle: int, inputs_json: str) -> str:
+        """Run a loaded model, returning nested lists as the shim does."""
+        import numpy
+
+        session = self.sessions[handle]
+        feeds = {
+            name: numpy.asarray(spec["data"], dtype=spec["type"])
+            for name, spec in jsonlib.loads(inputs_json).items()
+        }
+        names = [o.name for o in session.get_outputs()]
+        outputs = session.run(names, feeds)
+        return jsonlib.dumps(
+            {name: numpy.asarray(value).tolist() for name, value in zip(names, outputs)}
+        )
 
     async def fetch(
         self,

@@ -36,7 +36,7 @@ const baseline = libraries();
 py.runPython(`
 import sys
 sys.path.insert(0, "/app")
-import json, supie, supie.app, supie.supabase, supie.flow
+import json, supie, supie.app, supie.supabase, supie.flow, supie.onnx
 ${modules ? `import ${modules}` : ""}
 `);
 if (libraries() > baseline) {

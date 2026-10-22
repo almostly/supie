@@ -21,6 +21,9 @@ dependencies = [
     "tomlkit>=0.13",  # editing supabase/config.toml without losing comments
 ]
 
+[project.optional-dependencies]
+models = ["onnx>=1.17"]  # supie model prepare
+
 [project.scripts]
 supie = "supie.cli:app"
 
@@ -31,6 +34,8 @@ Repository = "https://github.com/almostly/supie"
 dev = [
     "pytest>=8",
     "openpyxl>=3.1",  # writes the workbook the edge package test uploads
+    "onnx>=1.17",  # builds the tiny model the ONNX tests serve
+    "onnxruntime>=1.20",  # runs ONNX models in tests, standing in for the Edge Runtime
     "commitizen>=4",
 ]
 

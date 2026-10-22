@@ -21,6 +21,8 @@ app = typer.Typer(
 )
 flow_app = typer.Typer(help="Workflows: the tables that keep their checkpoints.")
 app.add_typer(flow_app, name="flow")
+model_app = typer.Typer(help="ONNX models: get them ready for the Edge Runtime.")
+app.add_typer(model_app, name="model")
 
 Root = typer.Option(
     Path("."), "--root", help="The project folder, with supabase/ in it."
@@ -179,3 +181,22 @@ def flow_migration(root: Path = Root) -> None:
     path.write_text(resources.files("supie").joinpath("sql", "flows.sql").read_text())
     typer.echo(f"wrote {path.relative_to(project.root)}")
     typer.echo("next: `supabase db push` (or `supabase migration up` locally)")
+
+
+@model_app.command("prepare")
+def model_prepare(
+    source: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="The ONNX model."
+    ),
+    target: Path = typer.Argument(..., help="Where to write the prepared model."),
+) -> None:
+    """Remove ZipMap outputs, which the Edge Runtime's ONNX engine can't return."""
+    from supie import models
+
+    try:
+        changes = models.prepare(source, target)
+    except RuntimeError as error:
+        _fail(str(error))
+    for change in changes or ["nothing to change"]:
+        typer.echo(change)
+    typer.echo(f"wrote {target}")

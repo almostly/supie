@@ -137,3 +137,19 @@ async def decide_now(req: Request):
 
 
 scoring.mount(app, "/flows/scoring")
+
+
+# An ONNX model from (the fake) Storage, loaded on first use.
+from supie.onnx import Model  # noqa: E402
+
+
+@app.post("/model")
+async def model(req: Request):
+    """Score rows with the tiny logistic model."""
+    if not hasattr(app.state, "model"):
+        app.state.model = await Model.from_storage("models", "tiny.onnx")
+    out = await app.state.model.run({"features": req.json()["rows"]})
+    return {
+        "pd": [row[0] for row in out["probability"]],
+        "inputs": app.state.model.inputs,
+    }
