@@ -1,0 +1,16 @@
+# Hooks for prek (or pre-commit, which reads the same file).
+# Run on demand: uvx prek run --all-files
+# Install the git hooks: uvx prek install --hook-type pre-commit --hook-type commit-msg
+repos:
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.16.4
+    hooks:
+      - id: commitizen        # validate the message format: Area(+|~|-): description
+        stages: [commit-msg]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.14
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
