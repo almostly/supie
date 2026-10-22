@@ -1,0 +1,25 @@
+# Minimal Supabase CLI config for the Pyodide experiment.
+# Run `supabase init` in an empty folder first if you want the full template,
+# then copy the sections below into it.
+
+project_id = "pyodide-edge"
+
+[edge_runtime]
+enabled = true
+# "per_worker" keeps a worker alive across requests, like hosted Supabase.
+# The CLI default ("oneshot") boots a fresh worker per request, which would
+# show the Pyodide boot cost on every call.
+policy = "per_worker"
+deno_version = 2
+
+[functions.py-hello]
+verify_jwt = false
+# Pyodide's wasm, stdlib zip and lockfile are read at runtime, so they must
+# ship as static files next to the code.
+static_files = [
+  "./functions/py-hello/pyodide/*",
+  "./functions/py-hello/handler.py",
+  # Optional pre-booted interpreter. Used when PY_SNAPSHOT is set
+  # (supabase/functions/snapshot.env locally, `supabase secrets set` when hosted).
+  "./functions/py-hello/snapshot.bin.gz",
+]
