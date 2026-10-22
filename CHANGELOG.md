@@ -15,6 +15,7 @@
 - `gather`, `wait_for` and `sleep` for concurrency inside handlers.
 - Durable flow runs on pgflow (`mount(..., durable=True)`, `flow.start`, `flow.work`, `flow.status`): Postgres schedules each step and retries failures, and workers claim tasks through `supie_pgflow_*` functions (`supie flow migration --pgflow`).
 - Queues (`supie.queue`) on pgmq: `queue.send`, `@queue.consumer` with batches, retries with backoff and a dead-letter table, replay, stats and mounted work endpoints (`supie queue migration`).
+- Exactly-once results on queues: `send(..., key=...)` enqueues a message once per key, and `ctx.once(key, fn)` runs an effect once per key under a lease and replays its stored result.
 - `when=` and `unless=` conditions on steps, with pgflow's semantics, in inline and durable runs.
 - Type annotations throughout, checked by ty and enforced by ruff's annotation rules.
 - Requests and responses cross between the shim and Python as JSON metadata, a newline and the body as is, instead of the body nested in JSON. Unescaping and escaping the nested body cost MicroPython about a second per megabyte; it now parses 10 MB in 0.5 s.

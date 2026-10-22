@@ -14,7 +14,10 @@
 Messages live in pgmq (Supabase Queues), reached through the supie_queue_*
 functions (`supie queue migration`). A message is delivered at least once: a
 failed attempt comes back after a backoff, and after max_attempts it moves to
-the supie_queue_dead table, with the error, until replayed. Work runs when
+the supie_queue_dead table, with the error, until replayed. For effectively
+exactly-once results, send with key= so a retried send isn't enqueued twice,
+and wrap effects in ctx.once(key, fn) so a repeat delivery doesn't run them
+again. Work runs when
 something calls queue.work(): pg_cron through the mounted work endpoint, or a
 handler right after sending.
 
@@ -47,8 +50,22 @@ if TYPE_CHECKING:
     class Backend(Protocol):
         """Where a queue's messages live."""
 
-        async def send(self, messages: list[Any], delay: int) -> list[int]:
-            """Enqueue messages after delay seconds; return their IDs."""
+        async def send(
+            self, messages: list[Any], delay: int, keys: list[str | None] | None
+        ) -> list[int]:
+            """Enqueue messages after delay seconds; a known key returns its first ID."""
+            ...
+
+        async def once_begin(self, key: str, lease: int) -> dict[str, Any]:
+            """Claim an effect: state "run", "done" (with "result") or "busy"."""
+            ...
+
+        async def once_finish(self, key: str, result: Any) -> None:
+            """Record an effect's result."""
+            ...
+
+        async def once_release(self, key: str) -> None:
+            """Release a failed effect's lease."""
             ...
 
         async def read(
@@ -93,6 +110,10 @@ def _check_name(name: str) -> None:
         )
 
 
+class Busy(Exception):
+    """Another delivery is running this effect right now; this attempt retries later."""
+
+
 class QueueContext:
     """What a consumer can use: the message's ID and attempt, and Supabase."""
 
@@ -119,6 +140,36 @@ class QueueContext:
         """Call another Edge Function as the service."""
         return await self.supabase_admin.functions.invoke(name, body, headers)
 
+    async def once(
+        self, key: str, fn: Callable[[], Any], lease: int | None = None
+    ) -> Any:
+        """Run fn at most once per key, and return its result on every delivery.
+
+        The first delivery runs fn and stores its (JSON) result; repeats get the
+        stored result without running fn. While fn runs, the key holds a lease
+        (the queue's visibility by default): another delivery arriving then
+        raises Busy and retries later. If fn raises, the lease is released so a
+        retry can run it. If the worker dies after fn but before its result is
+        stored, the next delivery runs fn again, so effects outside the database
+        should still tolerate a rare repeat.
+        """
+        backend = self.queue._backend()
+        claim = await backend.once_begin(key, lease or self.queue.visibility)
+        if claim["state"] == "done":
+            return claim.get("result")
+        if claim["state"] == "busy":
+            raise Busy(key + " is being run by another delivery")
+        try:
+            result = fn()
+            if hasattr(result, "send"):
+                result = await result
+        except Exception:
+            await backend.once_release(key)
+            raise
+        result = json.loads(json.dumps(result))
+        await backend.once_finish(key, result)
+        return result
+
 
 class Queue:
     """A named pgmq queue, and the consumer that handles its messages."""
@@ -141,14 +192,29 @@ class Queue:
             self.backend = SupabaseQueue(self.name)
         return self.backend
 
-    async def send(self, message: Any, delay: float = 0) -> int:
-        """Enqueue one JSON message, visible after delay seconds; return its ID."""
-        return (await self.send_batch([message], delay))[0]
+    async def send(self, message: Any, delay: float = 0, key: str | None = None) -> int:
+        """Enqueue one JSON message, visible after delay seconds; return its ID.
 
-    async def send_batch(self, messages: list[Any], delay: float = 0) -> list[int]:
-        """Enqueue several JSON messages at once; return their IDs."""
+        With key, a message is enqueued once per key: sending the same key again
+        (a client retrying after a lost response) returns the first message's ID.
+        """
+        keys: list[str | None] | None = None if key is None else [key]
+        return (await self.send_batch([message], delay, keys))[0]
+
+    async def send_batch(
+        self,
+        messages: list[Any],
+        delay: float = 0,
+        keys: list[str | None] | None = None,
+    ) -> list[int]:
+        """Enqueue several JSON messages at once; return their IDs.
+
+        keys, when given, has a key (or None) per message, as for send.
+        """
+        if keys is not None and len(keys) != len(messages):
+            raise ValueError("keys must have one entry per message")
         payload = [json.loads(json.dumps(m)) for m in messages]
-        return await self._backend().send(payload, int(delay))
+        return await self._backend().send(payload, int(delay), keys)
 
     def consumer(
         self,
@@ -304,14 +370,38 @@ class SupabaseQueue:
             self._created = True
         return self.client
 
-    async def send(self, messages: list[Any], delay: int) -> list[int]:
-        """Enqueue messages."""
+    async def send(
+        self, messages: list[Any], delay: int, keys: list[str | None] | None
+    ) -> list[int]:
+        """Enqueue messages, once per key."""
         db = await self._db()
         result = await db.rpc(
             "supie_queue_send",
-            {"queue": self.name, "messages": messages, "delay": delay},
+            {"queue": self.name, "messages": messages, "delay": delay, "keys": keys},
         )
         return list(result.data or [])
+
+    async def once_begin(self, key: str, lease: int) -> dict[str, Any]:
+        """Claim an effect."""
+        db = await self._db()
+        result = await db.rpc(
+            "supie_queue_once_begin",
+            {"queue": self.name, "key": key, "lease_seconds": lease},
+        )
+        return dict(result.data)
+
+    async def once_finish(self, key: str, result: Any) -> None:
+        """Record an effect's result."""
+        db = await self._db()
+        await db.rpc(
+            "supie_queue_once_finish",
+            {"queue": self.name, "key": key, "result": result},
+        )
+
+    async def once_release(self, key: str) -> None:
+        """Release a failed effect's lease."""
+        db = await self._db()
+        await db.rpc("supie_queue_once_release", {"queue": self.name, "key": key})
 
     async def read(
         self, visibility: int, qty: int, poll_seconds: int
@@ -369,15 +459,25 @@ class MemoryQueue:
         """Start empty."""
         self.messages: dict[int, dict[str, Any]] = {}
         self.dead: dict[int, dict[str, Any]] = {}
+        self.keys: dict[str, int] = {}
+        self.done: dict[str, dict[str, Any]] = {}
         self._next = 0
         self._next_dead = 0
         self.total_sent = 0
 
-    async def send(self, messages: list[Any], delay: int) -> list[int]:
-        """Enqueue messages."""
+    async def send(
+        self, messages: list[Any], delay: int, keys: list[str | None] | None = None
+    ) -> list[int]:
+        """Enqueue messages, once per key."""
         ids = []
-        for message in messages:
+        for i, message in enumerate(messages):
+            key = None if keys is None else keys[i]
+            if key is not None and key in self.keys:
+                ids.append(self.keys[key])
+                continue
             self._next += 1
+            if key is not None:
+                self.keys[key] = self._next
             self.messages[self._next] = {
                 "message": json.loads(json.dumps(message)),
                 "attempt": 0,
@@ -385,8 +485,29 @@ class MemoryQueue:
                 "enqueued_at": _now(),
             }
             ids.append(self._next)
-        self.total_sent += len(ids)
+        self.total_sent = self._next
         return ids
+
+    async def once_begin(self, key: str, lease: int) -> dict[str, Any]:
+        """Claim an effect."""
+        entry = self.done.get(key)
+        now = _now()
+        expired = entry is not None and entry["status"] == "running"
+        if entry is None or (expired and entry["lease_until"] <= now):
+            self.done[key] = {"status": "running", "lease_until": now + lease}
+            return {"state": "run"}
+        if entry["status"] == "done":
+            return {"state": "done", "result": entry["result"]}
+        return {"state": "busy"}
+
+    async def once_finish(self, key: str, result: Any) -> None:
+        """Record an effect's result."""
+        self.done[key] = {"status": "done", "result": result}
+
+    async def once_release(self, key: str) -> None:
+        """Release a failed effect's lease."""
+        if self.done.get(key, {}).get("status") == "running":
+            self.done[key]["lease_until"] = _now()
 
     async def read(
         self, visibility: int, qty: int, poll_seconds: int
@@ -435,7 +556,7 @@ class MemoryQueue:
         entry = self.dead.pop(dead_id, None)
         if entry is None:
             return None
-        return (await self.send([entry["message"]], 0))[0]
+        return (await self.send([entry["message"]], 0, None))[0]
 
     async def stats(self) -> dict[str, Any]:
         """Queue metrics."""

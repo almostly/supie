@@ -13,15 +13,22 @@ queue = Queue("edge_queue")
 
 @queue.consumer(batch=10, max_attempts=2, backoff=1)
 async def handle(ctx: Any, message: dict[str, Any]) -> None:
-    """Fail messages marked to fail; the rest succeed."""
+    """Fail messages marked to fail; record the rest's decision exactly once."""
     if message.get("fail"):
         raise ValueError("application " + str(message["id"]) + " is invalid")
+
+    def decide() -> dict[str, Any]:
+        """The effect to apply once per application."""
+        return {"decided": message["id"]}
+
+    await ctx.once("decide:" + str(message["id"]), decide)
 
 
 @app.post("/score")
 async def score(req: Request) -> Response:
     """Queue the application and start working on the queue after the response."""
-    msg_id = await queue.send(req.json())
+    application = req.json()
+    msg_id = await queue.send(application, key="application-" + str(application["id"]))
     req.background(queue.work(req, seconds=20, idle_polls=3))
     return Response({"queued": True, "msg_id": msg_id}, status=202)
 

@@ -336,6 +336,25 @@ supabase db push
 - **Who handles messages.** `queue.work()` handles messages until the queue is idle: call it in the background after sending, and from pg_cron through `POST <prefix>/work` so nothing waits for the next request.
 - **Batches.** The messages in one read are handled concurrently.
 
+### Nothing lost, nothing applied twice
+
+A queue delivers each message at least once: nothing is lost once `send` returns, but a message can occasionally be handled twice (a worker finishes, then dies before acknowledging). Two tools make the result exactly once:
+
+```python
+await queue.send(application, key=f"application-{application['id']}")
+
+
+@queue.consumer(max_attempts=5)
+async def handle(ctx, message):
+    await ctx.once(f"decide:{message['id']}", lambda: decide(message))
+```
+
+- **Send keys.** A message is enqueued once per key. A client that got no 202 can safely send again: the same key returns the first message's ID and enqueues nothing, even when the retries race each other.
+- **`ctx.once(key, fn)`.** Runs `fn` once per key and stores its JSON result; any later delivery gets the stored result without running `fn`. While `fn` runs, the key holds a lease, so a delivery arriving meanwhile retries later instead of running it in parallel. If `fn` raises, the lease is released and a retry runs it.
+- **The one gap.** If a worker dies after `fn` finished but before its result was stored, the next delivery runs `fn` again. That can't be closed for effects outside the database (an email, a payment API), so give those their own idempotency key where the API offers one.
+
+Tested with forced duplicates: a crash after the effect, a failed effect, concurrent deliveries of one effect, a message redelivered to a second worker mid-effect, and racing retries of one send, on pgmq and in the Edge Runtime on both runtimes. Keys and results stay in `supie_queue_keys` and `supie_queue_once`; delete old rows on a schedule.
+
 Messages live in pgmq, the engine behind Supabase Queues. Like the pgflow bridge, supie reaches it through `public` functions only the service role can call, so you don't need to expose the `pgmq_public` schema. For tests, `Queue("scoring", MemoryQueue())` keeps messages in memory.
 
 ## Testing

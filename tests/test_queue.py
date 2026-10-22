@@ -187,3 +187,106 @@ def test_send_from_handler_and_mounted_endpoints():
         "msg_id": 3
     }
     assert client.post("/queues/scoring/dead/99/replay", headers=SERVICE).status == 404
+
+
+def test_send_keys_enqueue_once():
+    """A retried send with the same key returns the first ID and adds nothing."""
+    queue = Queue("keyed", MemoryQueue())
+
+    async def go():
+        """Send keyed and unkeyed messages, then repeat the keyed ones."""
+        first = await queue.send_batch(
+            [{"a": 1}, {"a": 2}, {"a": 3}], keys=["k1", None, "k3"]
+        )
+        again = await queue.send({"a": 1}, key="k1")
+        batch = await queue.send_batch([{"a": 3}, {"a": 4}], keys=["k3", "k4"])
+        return first, again, batch, await queue.stats()
+
+    first, again, batch, stats = run(go())
+    assert first == [1, 2, 3] and again == 1 and batch == [3, 4]
+    assert stats["length"] == 4
+    with pytest.raises(ValueError, match="one entry per message"):
+        run(queue.send_batch([{}, {}], keys=["only-one"]))
+
+
+def test_once_survives_a_crash_after_the_effect():
+    """The effect ran, then the handler crashed before ack: the redelivery doesn't repeat it."""
+    queue = Queue("crashy", MemoryQueue())
+    effects = []
+
+    @queue.consumer(max_attempts=3, backoff=0)
+    async def handle(ctx, message):
+        """Send the email once, then crash on the first attempt."""
+
+        async def send_email():
+            """The effect."""
+            effects.append(message["id"])
+            return {"email": "sent", "to": message["id"]}
+
+        result = await ctx.once(f"email:{message['id']}", send_email)
+        assert result == {"email": "sent", "to": message["id"]}
+        if ctx.attempt == 1:
+            raise RuntimeError("worker died before ack")
+
+    async def go():
+        """One message, worked until done."""
+        await queue.send({"id": 5})
+        return await queue.work(seconds=5, idle_polls=2)
+
+    assert run(go()) == {"handled": 1, "retried": 1, "dead": 0}
+    assert effects == [5]
+
+
+def test_once_retries_a_failed_effect():
+    """An effect that raises releases its lease, so the retry runs it again."""
+    queue = Queue("flaky_effect", MemoryQueue())
+    attempts = []
+
+    @queue.consumer(max_attempts=3, backoff=0)
+    async def handle(ctx, message):
+        """The effect fails the first time."""
+
+        def charge():
+            """The effect."""
+            attempts.append(ctx.attempt)
+            if ctx.attempt == 1:
+                raise ConnectionError("payment API down")
+            return "charged"
+
+        assert await ctx.once("charge:1", charge) == "charged"
+
+    async def go():
+        """One message, worked until done."""
+        await queue.send({})
+        return await queue.work(seconds=5, idle_polls=2)
+
+    assert run(go()) == {"handled": 1, "retried": 1, "dead": 0}
+    assert attempts == [1, 2]
+
+
+def test_once_makes_concurrent_deliveries_wait():
+    """Two deliveries of the same effect at once: one runs it, the other waits, then reuses it."""
+    queue = Queue("racing", MemoryQueue())
+    effects = []
+    results = []
+
+    @queue.consumer(batch=10, max_attempts=5, backoff=0.2)
+    async def handle(ctx, message):
+        """Both messages share one effect key."""
+
+        async def effect():
+            """Slow enough for the other delivery to arrive meanwhile."""
+            effects.append(ctx.msg_id)
+            await sleep(0.3)
+            return "done once"
+
+        results.append(await ctx.once("shared", effect, lease=5))
+
+    async def go():
+        """Two messages in one batch."""
+        await queue.send_batch([{"n": 1}, {"n": 2}])
+        return await queue.work(seconds=5, idle_polls=3)
+
+    counts = run(go())
+    assert counts == {"handled": 2, "retried": 1, "dead": 0}
+    assert len(effects) == 1 and results == ["done once", "done once"]

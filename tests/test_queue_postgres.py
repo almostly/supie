@@ -155,7 +155,7 @@ def test_queue_in_the_edge_runtime(rest, edge_queue, fn, queue_name):
 
     _, db = rest
     base, container = edge_queue
-    for i in range(6):
+    for i in [0, 1, 2, 3, 4, 5, 0, 2, 4]:  # the last three are retried sends
         body = json.dumps({"id": i, "fail": i == 5}).encode()
         request = urllib.request.Request(
             f"{base}/{fn}/score",
@@ -176,6 +176,14 @@ def test_queue_in_the_edge_runtime(rest, edge_queue, fn, queue_name):
     assert (left, dead) == ("0", "1"), logs(container)
     error = psql(db, f"select error from supie_queue_dead where queue = '{queue_name}'")
     assert "application 5 is invalid" in error
+    sent = psql(
+        db, f"select count(*) from supie_queue_keys where queue = '{queue_name}'"
+    )
+    decided = psql(
+        db,
+        f"select count(*) from supie_queue_once where queue = '{queue_name}' and status = 'done'",
+    )
+    assert (sent, decided) == ("6", "5")
     stats = urllib.request.Request(
         f"{base}/{fn}/queue/stats", headers={"Authorization": f"Bearer {SERVICE}"}
     )
@@ -203,3 +211,72 @@ def test_concurrent_creates_of_a_new_queue(rest):
     assert (
         psql(db, "select count(*) from pgmq.meta where queue_name = 'pg_race'") == "1"
     )
+
+
+def test_concurrent_sends_with_one_key(rest):
+    """Clients retrying the same send at once enqueue a single message."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from stack import docker
+
+    base, db = rest
+    on_pgmq(base, Queue("pg_keyed").send({"warm": True}))  # create the queue first
+    sql = (
+        "select (public.supie_queue_send('pg_keyed', '[{\"id\": 42}]', 0,"
+        " '[\"application-42\"]'))[1]"
+    )
+
+    def send(_):
+        """One client's attempt, straight at the database."""
+        args = ["exec", db, "psql", "-U", "postgres", "-h", "localhost", "-tAc", sql]
+        return docker(*args).stdout.strip()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ids = list(pool.map(send, range(8)))
+    assert len(set(ids)) == 1, ids
+    assert (
+        psql(db, "select count(*) from pgmq.q_pg_keyed where message->>'id' = '42'")
+        == "1"
+    )
+
+
+def test_once_across_two_workers_and_a_redelivery(rest):
+    """A message reappears to a second worker mid-effect; the effect still runs once."""
+    import asyncio
+
+    base, db = rest
+    queue = Queue("pg_once")
+    effects = []
+    deliveries = []
+
+    @queue.consumer(batch=1, max_attempts=10, backoff=1, visibility=1)
+    async def handle(ctx, message):
+        """A slow effect, longer than the visibility timeout."""
+        deliveries.append(ctx.attempt)
+
+        async def effect():
+            """Record and take a while."""
+            effects.append(ctx.attempt)
+            await asyncio.sleep(2.5)
+            return {"applied": message["id"]}
+
+        await ctx.once(f"apply:{message['id']}", effect, lease=10)
+
+    async def go():
+        """Send one message, then run two workers side by side."""
+        await queue.send({"id": 1})
+        await asyncio.gather(
+            queue.work(seconds=12, idle_polls=4), queue.work(seconds=12, idle_polls=4)
+        )
+
+    run(go(), env=ENV, fetch=proxy(base))
+    assert len(deliveries) >= 2, deliveries  # the message really was redelivered
+    assert effects == [1], effects
+    assert (
+        psql(
+            db,
+            "select status, result->>'applied' from supie_queue_once where queue = 'pg_once'",
+        )
+        == "done|1"
+    )
+    assert psql(db, "select count(*) from pgmq.q_pg_once") == "0"
