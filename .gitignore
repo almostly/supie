@@ -14,3 +14,6 @@ build/
 # local secrets (connection strings, API keys): never committed or packaged
 .env
 .env.*
+
+# build output of the examples
+examples/*/supabase/functions/

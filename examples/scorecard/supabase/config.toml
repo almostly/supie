@@ -1,0 +1,3 @@
+# Minimal Supabase config for the example. In a real project, `supabase init`
+# writes the full file and `supie build` adds each function's entry.
+project_id = "supie-scorecard"
