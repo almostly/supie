@@ -16,6 +16,7 @@
 - Durable flow runs on pgflow (`mount(..., durable=True)`, `flow.start`, `flow.work`, `flow.status`): Postgres schedules each step and retries failures, and workers claim tasks through `supie_pgflow_*` functions (`supie flow migration --pgflow`).
 - `when=` and `unless=` conditions on steps, with pgflow's semantics, in inline and durable runs.
 - Type annotations throughout, checked by ty and enforced by ruff's annotation rules.
+- Pyodide's asyncio callbacks run through a MessageChannel instead of `setTimeout(0)`, whose clamping made every `await` cost milliseconds: a six-step inline flow went from 19 ms to under 1 ms on a Mac.
 - Packages for Pyodide functions from `requirements.txt`: pure-Python wheels from PyPI and Pyodide's prebuilt packages from its CDN, installed at build time and cached.
 - Snapshots that hold compiled extensions such as pydantic-core, restored by loading each extension where it was before the memory is copied back. `preload` can also name the function's own modules. On hosted Supabase, pydantic and openpyxl went from half the cold starts failing to all succeeding.
 - `supie build` reports the compressed size, close to what Supabase counts against the bundle limit.

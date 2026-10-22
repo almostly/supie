@@ -16,10 +16,31 @@ Memory.prototype = NativeMemory.prototype;
 WebAssembly.Memory = Memory as unknown as typeof WebAssembly.Memory;
 
 // Pyodide sees Node's process object and schedules its asyncio callbacks with
-// setImmediate, which the Edge Runtime doesn't define.
+// setImmediate, which the Edge Runtime doesn't define. setTimeout(fn, 0) would
+// do, but chained timeouts are clamped to milliseconds, and every await in
+// Python is a hop through here. A MessageChannel message runs on the next
+// macrotask without that delay, as browsers' setImmediate polyfills do.
+type Immediate = (...args: unknown[]) => void;
 const g = globalThis as {
-  setImmediate?: (fn: (...args: unknown[]) => void, ...args: unknown[]) => unknown;
+  setImmediate?: (fn: Immediate, ...args: unknown[]) => unknown;
   clearImmediate?: (id: unknown) => void;
 };
-g.setImmediate ??= (fn, ...args) => setTimeout(fn, 0, ...args);
-g.clearImmediate ??= (id) => clearTimeout(id as number);
+if (!g.setImmediate) {
+  const pending = new Map<number, () => void>();
+  let next = 0;
+  const channel = new MessageChannel();
+  channel.port1.onmessage = (event: MessageEvent<number>) => {
+    const run = pending.get(event.data);
+    pending.delete(event.data);
+    run?.();
+  };
+  // an open port would keep the worker's event loop alive
+  (channel.port1 as { unref?: () => void }).unref?.();
+  g.setImmediate = (fn, ...args) => {
+    const id = next++;
+    pending.set(id, () => fn(...args));
+    channel.port2.postMessage(id);
+    return id;
+  };
+  g.clearImmediate = (id) => pending.delete(id as number);
+}

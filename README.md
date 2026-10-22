@@ -229,6 +229,17 @@ scoring.mount(app, "/flows/scoring")  # or start runs in the background
 
 A run started by a signed-in user is visible only to that user and the service role. Anyone else holding the random run ID can read a run started anonymously.
 
+### How fast inline flows are
+
+Inline steps are plain function calls in one process, so a flow costs about what its steps compute. Six steps of scorecard logic on JSON input (features, then bins and policy rules in parallel, a score, and a route chosen with `when=`), with the memory store:
+
+| | per run, warm | first run in a request | request end to end |
+|---|---|---|---|
+| MicroPython, hosted | 2.7 ms | 5 ms | median 0.26 s |
+| Pyodide, hosted | 2 to 5 ms | 11 ms | median 0.8 s (cold boot) |
+
+End to end is mostly the worker's cold start and the network. The Supabase store adds a database write per step, and durable runs on pgflow add database round trips between steps, so use them for runs that must survive a worker, not for a fast answer.
+
 ### Where checkpoints live
 
 By default, checkpoints go to two tables in your project. Create them once:
