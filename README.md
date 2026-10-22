@@ -280,7 +280,10 @@ state = await scoring.status(run_id)
 - **Names are pgflow's.** Flow and step names use letters, digits and single underscores. `goto` branches aren't supported; use `when=`.
 - **Bridged over PostgREST.** pgflow's functions live in the `pgflow` and `pgmq` schemas, which PostgREST doesn't expose, and WebAssembly can't open a Postgres connection. The `--pgflow` migration adds `supie_pgflow_*` functions that only the service role can call.
 
-Tested against pgflow 0.17.2 on Supabase's Postgres, with workers in the Edge Runtime on MicroPython and Pyodide: parallel steps, a retry, a skipped route and the endpoints.
+- **pgflow's telemetry is on by default.** Its install schedules a daily job that sends anonymous, bucketed usage counts (runs, workers, which features are used) to telemetry.pgflow.dev. Turn it off with `select pgflow_telemetry.disable();`, or preview the payload with `select pgflow_telemetry.preview();`.
+- **pgflow's install schedules cron jobs.** `pgflow_ensure_workers`, `pgflow_requeue_stalled_tasks` and `pgflow_cleanup_logs`, and it enables `pgmq`, `pg_cron` and `pg_net`.
+
+Tested against pgflow 0.17.2 locally and on hosted Supabase, with workers on MicroPython and Pyodide: parallel steps, a failed attempt retried by pgflow, a skipped route and the endpoints. Each hosted run took 4 to 7 s end to end.
 
 ## Testing
 
