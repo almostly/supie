@@ -189,6 +189,77 @@ def test_send_from_handler_and_mounted_endpoints():
     assert client.post("/queues/scoring/dead/99/replay", headers=SERVICE).status == 404
 
 
+def test_work_seconds_are_capped_and_checked():
+    """The work endpoint caps ?seconds= at max_seconds and rejects a non-number."""
+    app = App()
+    queue = Queue("busy_worker", MemoryQueue())
+
+    @queue.consumer(max_attempts=1000, backoff=0)
+    async def handle(ctx, message):
+        """Fail forever, so the queue is never idle."""
+        raise RuntimeError("again")
+
+    queue.mount(app, "/q", max_seconds=0.3)
+    client = TestClient(app)
+    run(queue.send({}))
+    started = time.time()
+    assert client.post("/q/work?seconds=1000", headers=SERVICE).status == 200
+    assert time.time() - started < 5
+    assert client.post("/q/work?seconds=soon", headers=SERVICE).status == 400
+
+
+def test_handled_messages_are_acknowledged_per_batch():
+    """One ack call for a batch's handled messages; failures retry on their own."""
+
+    class Counting(MemoryQueue):
+        """Record each ack call."""
+
+        def __init__(self):
+            """Start with no acks."""
+            super().__init__()
+            self.acks = []
+
+        async def ack(self, msg_ids):
+            """Record, then delete."""
+            self.acks.append(list(msg_ids))
+            await super().ack(msg_ids)
+
+    backend = Counting()
+    queue = Queue("acked", backend)
+
+    @queue.consumer(batch=10, max_attempts=1)
+    async def handle(ctx, message):
+        """Fail message 2."""
+        if message["n"] == 2:
+            raise ValueError("bad")
+
+    async def go():
+        """Four messages in one batch."""
+        await queue.send_batch([{"n": n} for n in range(4)])
+        return await queue.work(seconds=5)
+
+    assert run(go()) == {"handled": 3, "retried": 0, "dead": 1}
+    assert backend.acks == [[1, 2, 4]]
+
+
+def test_backoff_doubles_up_to_the_cap_with_jitter():
+    """Each delay is the doubled backoff, capped, less up to half at random."""
+    queue = Queue("backing_off", MemoryQueue())
+
+    @queue.consumer(backoff=10, max_backoff=60)
+    async def handle(ctx, message):
+        """Unused."""
+
+    async def delays(attempt):
+        """Many draws for one attempt."""
+        return {queue._backoff(attempt) for _ in range(200)}
+
+    first, third, tenth = run(delays(1)), run(delays(3)), run(delays(10))
+    assert min(first) >= 5 and max(first) <= 10
+    assert min(third) >= 20 and max(third) <= 40
+    assert min(tenth) >= 30 and max(tenth) <= 60 and len(tenth) > 5
+
+
 def test_send_keys_enqueue_once():
     """A retried send with the same key returns the first ID and adds nothing."""
     queue = Queue("keyed", MemoryQueue())

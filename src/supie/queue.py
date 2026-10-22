@@ -35,6 +35,7 @@ from supie.app import (
     env,
     format_exception,
     gather,
+    new_id,
     wait_for,
 )
 
@@ -77,8 +78,8 @@ if TYPE_CHECKING:
             """Take up to qty visible messages, hiding them for visibility seconds."""
             ...
 
-        async def ack(self, msg_id: int) -> None:
-            """Delete a handled message."""
+        async def ack(self, msg_ids: list[int]) -> None:
+            """Delete handled messages."""
             ...
 
         async def retry(self, msg_id: int, delay: int) -> None:
@@ -204,6 +205,7 @@ class Queue:
         self.batch = 10
         self.max_attempts = 5
         self.backoff = 1.0
+        self.max_backoff = 300.0
         self.visibility = 30
         self.timeout: float | None = None
 
@@ -244,14 +246,17 @@ class Queue:
         backoff: float = 1.0,
         visibility: int = 30,
         timeout: float | None = None,
+        max_backoff: float = 300,
     ) -> Callable[[F], F]:
         """Register the function that handles each message: fn(ctx, message).
 
         batch: messages taken per read, handled concurrently. A failed attempt
-        comes back after backoff, 2*backoff, ... seconds; after max_attempts the
-        message goes to the dead letters. visibility: seconds a message stays
-        hidden while handled, so keep it above the slowest handling. timeout:
-        seconds before an async handler counts as failed.
+        comes back after about backoff, 2*backoff, ... seconds, up to
+        max_backoff, each shortened by up to half at random so retries after an
+        outage spread out; after max_attempts the message goes to the dead
+        letters. visibility: seconds a message stays hidden while handled, so
+        keep it above the slowest handling. timeout: seconds before an async
+        handler counts as failed.
         """
 
         def register(fn: F) -> F:
@@ -260,6 +265,7 @@ class Queue:
             self.batch = batch
             self.max_attempts = max_attempts
             self.backoff = backoff
+            self.max_backoff = max_backoff
             self.visibility = visibility
             self.timeout = timeout
             return fn
@@ -273,15 +279,19 @@ class Queue:
 
         Returns how many messages were handled, retried and sent to the dead
         letters. Each message's CPU counts against this invocation's budget,
-        so a worker stops early rather than run forever.
+        so a worker stops early rather than run forever. With a consumer
+        timeout, no batch after the first is read that could run past seconds.
+        Handled messages are acknowledged together, once per batch.
         """
         if self.handler is None:
             raise RuntimeError(self.name + " has no consumer: use @queue.consumer()")
         backend = self._backend()
         counts = {"handled": 0, "retried": 0, "dead": 0}
         idle = 0
-        deadline = _now() + seconds
-        while idle < idle_polls and _now() < deadline:
+        deadline = _now() + seconds - (self.timeout or 0)
+        polls = 0
+        while idle < idle_polls and (polls == 0 or _now() < deadline):
+            polls += 1
             messages = await backend.read(self.visibility, self.batch, 1)
             if not messages:
                 idle += 1
@@ -290,14 +300,21 @@ class Queue:
             outcomes = await gather(
                 *[self._handle(backend, m, request) for m in messages]
             )
-            for outcome in outcomes:
+            handled = []
+            for message, outcome in zip(messages, outcomes):
                 counts[outcome] += 1
+                if outcome == "handled":
+                    handled.append(int(message["msg_id"]))
+            if handled:
+                await backend.ack(handled)
         return counts
 
     async def _handle(
         self, backend: Backend, record: dict[str, Any], request: Request | None
     ) -> str:
-        """Handle one message; ack it, retry it or move it to the dead letters."""
+        """Handle one message; retry it or move it to the dead letters, or
+        return "handled" for work to acknowledge.
+        """
         handler = self.handler
         assert handler is not None
         attempt = int(record["attempt"])
@@ -316,10 +333,17 @@ class Queue:
             if attempt >= self.max_attempts:
                 await backend.kill(ctx.msg_id, format_exception(error)[-4000:])
                 return "dead"
-            await backend.retry(ctx.msg_id, int(self.backoff * 2 ** (attempt - 1)))
+            await backend.retry(ctx.msg_id, self._backoff(attempt))
             return "retried"
-        await backend.ack(ctx.msg_id)
         return "handled"
+
+    def _backoff(self, attempt: int) -> int:
+        """Seconds before a failed attempt comes back: doubling up to the cap,
+        less up to half of that at random.
+        """
+        delay = min(self.backoff * 2 ** (attempt - 1), self.max_backoff)
+        spread = int(new_id()[:8], 16) / 0xFFFFFFFF
+        return int(delay * (1 - spread / 2) + 0.5)
 
     async def stats(self) -> dict[str, Any]:
         """Queue length, oldest message age in seconds and dead-letter count."""
@@ -329,9 +353,13 @@ class Queue:
         """Send a dead letter back to the queue; return its new ID, or None."""
         return await self._backend().replay(dead_id)
 
-    def mount(self, app: App, prefix: str) -> Queue:
+    def mount(self, app: App, prefix: str, max_seconds: float = 140) -> Queue:
         """Add service-role endpoints: POST prefix/work, GET prefix/stats and
         POST prefix/dead/<id>/replay. Call the work endpoint from pg_cron.
+
+        The work endpoint's ?seconds= (60 by default) is capped at max_seconds,
+        below the Edge Functions' wall-clock limit (150 s on the free plan;
+        raise it toward 400 s on paid plans).
         """
         queue = self
 
@@ -344,7 +372,11 @@ class Queue:
         async def work(req: Request) -> dict[str, int]:
             """Handle waiting messages."""
             service_only(req)
-            return await queue.work(req, seconds=int(req.query.get("seconds", "60")))
+            try:
+                seconds = float(req.query.get("seconds", "60"))
+            except ValueError:
+                raise HTTPError(400, "seconds must be a number") from None
+            return await queue.work(req, seconds=min(max(seconds, 0), max_seconds))
 
         @app.get(prefix + "/stats")
         async def stats(req: Request) -> dict[str, Any]:
@@ -445,10 +477,10 @@ class SupabaseQueue:
         )
         return list(result.data or [])
 
-    async def ack(self, msg_id: int) -> None:
-        """Delete a handled message."""
+    async def ack(self, msg_ids: list[int]) -> None:
+        """Delete handled messages."""
         db = await self._db()
-        await db.rpc("supie_queue_ack", {"queue": self.name, "msg_id": msg_id})
+        await db.rpc("supie_queue_ack", {"queue": self.name, "msg_ids": msg_ids})
 
     async def retry(self, msg_id: int, delay: int) -> None:
         """Make a message visible again later."""
@@ -569,9 +601,10 @@ class MemoryQueue:
                 )
         return out
 
-    async def ack(self, msg_id: int) -> None:
-        """Delete a handled message."""
-        self.messages.pop(msg_id, None)
+    async def ack(self, msg_ids: list[int]) -> None:
+        """Delete handled messages."""
+        for msg_id in msg_ids:
+            self.messages.pop(msg_id, None)
 
     async def retry(self, msg_id: int, delay: int) -> None:
         """Make a message visible again later."""

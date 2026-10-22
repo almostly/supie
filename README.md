@@ -344,10 +344,10 @@ supabase db push
 ```
 
 - **Delivery.** At least once. A message stays hidden for `visibility` seconds while it's handled, so keep that above the slowest handling; if a worker dies mid-message, it comes back after that.
-- **Retries.** A failed attempt (an exception, or `timeout` passed) comes back after `backoff`, then twice that, and so on. `ctx.attempt` says which attempt this is.
+- **Retries.** A failed attempt (an exception, or `timeout` passed) comes back after about `backoff`, then twice that, and so on up to `max_backoff` (300 s), each delay shortened by up to half at random so retries after an outage don't all land at once. `ctx.attempt` says which attempt this is.
 - **Dead letters.** After `max_attempts`, the message moves to `supie_queue_dead` with its last error and attempt count. `POST <prefix>/dead/<id>/replay` sends it back.
-- **Who handles messages.** `queue.work()` handles messages until the queue is idle: call it in the background after sending, and from pg_cron through `POST <prefix>/work` so nothing waits for the next request.
-- **Batches.** The messages in one read are handled concurrently.
+- **Who handles messages.** `queue.work()` handles messages until the queue is idle: call it in the background after sending, and from pg_cron through `POST <prefix>/work` so nothing waits for the next request. The endpoint's `?seconds=` (60 by default) is capped at `mount(..., max_seconds=140)`, under the free plan's 150 s wall-clock limit; raise it on paid plans. With a consumer `timeout`, `work` doesn't start a batch that could run past its seconds.
+- **Batches.** The messages in one read are handled concurrently, and the handled ones are acknowledged in one call.
 
 ### Nothing lost, nothing applied twice
 
@@ -366,7 +366,11 @@ async def handle(ctx, message):
 - **`ctx.once(key, fn)`.** Runs `fn` once per key and stores its JSON result; any later delivery gets the stored result without running `fn`. While `fn` runs, the key holds a lease (`lease=`, five times the visibility by default; keep it above `fn`'s longest run), so a delivery arriving meanwhile comes back when the lease ends instead of running it in parallel, without using up an attempt. If `fn` raises or is cancelled, the lease is released and a retry runs it; a runner whose lease ran out can't release or finish the one that took over.
 - **The one gap.** If a worker dies after `fn` finished but before its result was stored, the next delivery runs `fn` again. That can't be closed for effects outside the database (an email, a payment API), so give those their own idempotency key where the API offers one.
 
-Tested with forced duplicates: a crash after the effect, a failed effect, concurrent deliveries of one effect, a message redelivered to a second worker mid-effect, and racing retries of one send, on pgmq and in the Edge Runtime on both runtimes. Keys and results stay in `supie_queue_keys` and `supie_queue_once`; delete old rows on a schedule.
+Tested with forced duplicates: a crash after the effect, a failed effect, concurrent deliveries of one effect, a message redelivered to a second worker mid-effect, and racing retries of one send, on pgmq and in the Edge Runtime on both runtimes. Keys and results stay in `supie_queue_keys` and `supie_queue_once`. `supie_queue_prune()` deletes those older than 7 days (pass `older_than`), and dead letters only when you pass `dead_older_than`; schedule it with pg_cron:
+
+```sql
+select cron.schedule('supie-queue-prune', '0 3 * * *', 'select public.supie_queue_prune()');
+```
 
 Messages live in pgmq, the engine behind Supabase Queues. Like the pgflow bridge, supie reaches it through `public` functions only the service role can call, so you don't need to expose the `pgmq_public` schema. For tests, `Queue("scoring", MemoryQueue())` keeps messages in memory.
 

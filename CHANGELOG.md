@@ -14,8 +14,9 @@
 - Workflows (`supie.flow`): steps with dependencies, parallel execution, retries, timeouts and `goto` branches, checkpointed per run in Supabase tables (`supie flow migration`) or in memory, with endpoints to start, inspect and resume runs.
 - `gather`, `wait_for` and `sleep` for concurrency inside handlers.
 - Durable flow runs on pgflow (`mount(..., durable=True)`, `flow.start`, `flow.work`, `flow.status`): Postgres schedules each step and retries failures, and workers claim tasks through `supie_pgflow_*` functions (`supie flow migration --pgflow`).
-- Queues (`supie.queue`) on pgmq: `queue.send`, `@queue.consumer` with batches, retries with backoff and a dead-letter table, replay, stats and mounted work endpoints (`supie queue migration`).
-- Exactly-once results on queues: `send(..., key=...)` enqueues a message once per key, and `ctx.once(key, fn)` runs an effect once per key under a lease and replays its stored result.
+- Queues (`supie.queue`) on pgmq: `queue.send`, `@queue.consumer` with batches acknowledged in one call, retries with capped, jittered backoff and a dead-letter table, replay, stats and mounted work endpoints whose `?seconds=` is capped under the Edge Functions' wall-clock limit (`supie queue migration`).
+- `supie_queue_prune()` deletes old send keys and finished effects, and old dead letters when asked; schedule it with pg_cron.
+- Exactly-once results on queues: `send(..., key=...)` enqueues a message once per key, even when batches with overlapping keys race, and a dead letter takes its key along so a resend or replay enqueues it once. `ctx.once(key, fn)` runs an effect once per key under a lease that only its holder can finish or release, and replays its stored result; a delivery that finds the lease taken waits for it without using up an attempt.
 - `when=` and `unless=` conditions on steps, with pgflow's semantics, in inline and durable runs.
 - Type annotations throughout, checked by ty and enforced by ruff's annotation rules.
 - Requests and responses cross between the shim and Python as JSON metadata, a newline and the body as is, instead of the body nested in JSON. Unescaping and escaping the nested body cost MicroPython about a second per megabyte; it now parses 10 MB in 0.5 s.

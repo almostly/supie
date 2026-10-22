@@ -338,3 +338,36 @@ def test_keys_follow_dead_letters_and_replays(rest):
     dead = psql(db, "select id from supie_queue_dead where queue = 'pg_keyed_dead'")
     assert on_pgmq(base, queue.replay(int(dead))) == again
     assert psql(db, "select count(*) from pgmq.q_pg_keyed_dead") == "1"
+
+
+def test_prune_deletes_old_keys_and_effects(rest):
+    """Old keys and finished effects go; a live lease and dead letters stay by default."""
+    _, db = rest
+    psql(
+        db,
+        "insert into supie_queue_keys (queue, key, created_at) values"
+        " ('pg_prune', 'old', now() - interval '8 days'), ('pg_prune', 'new', now());"
+        " insert into supie_queue_once (queue, key, status, lease_until, updated_at) values"
+        " ('pg_prune', 'done', 'done', null, now() - interval '8 days'),"
+        " ('pg_prune', 'live', 'running', now() + interval '1 hour', now() - interval '8 days');"
+        " insert into supie_queue_dead (queue, msg_id, attempts, failed_at) values"
+        " ('pg_prune', 1, 1, now() - interval '30 days');",
+    )
+    pruned = json.loads(psql(db, "select public.supie_queue_prune()"))
+    assert pruned["keys"] >= 1 and pruned["once"] >= 1 and pruned["dead"] == 0
+    assert (
+        psql(db, "select key from supie_queue_keys where queue = 'pg_prune'") == "new"
+    )
+    assert (
+        psql(db, "select key from supie_queue_once where queue = 'pg_prune'") == "live"
+    )
+    pruned = json.loads(
+        psql(
+            db, "select public.supie_queue_prune(dead_older_than => interval '7 days')"
+        )
+    )
+    assert pruned["dead"] >= 1
+    assert (
+        psql(db, "select count(*) from supie_queue_dead where queue = 'pg_prune'")
+        == "0"
+    )

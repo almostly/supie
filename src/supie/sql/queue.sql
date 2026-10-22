@@ -28,8 +28,7 @@ grant select, insert, delete on public.supie_queue_dead to service_role;
 -- Idempotency keys for sends: a key is enqueued once per queue; sending it
 -- again returns the first message's ID. A message that goes to the dead
 -- letters takes its key along, so a resend enqueues it again; a replay brings
--- the key back. Delete old keys on a schedule, e.g.
--- delete from public.supie_queue_keys where created_at < now() - interval '7 days'.
+-- the key back. supie_queue_prune deletes old keys.
 create table if not exists public.supie_queue_keys (
   queue text not null,
   key text not null,
@@ -44,8 +43,8 @@ grant select, insert, update, delete on public.supie_queue_keys to service_role;
 
 -- Effects a consumer ran once (ctx.once): running under a lease, or done with
 -- their result. token names the lease's holder, so a runner whose lease ran out
--- can't finish or release the one that took over. Delete old rows on a
--- schedule, as for the keys.
+-- can't finish or release the one that took over. supie_queue_prune deletes
+-- old rows.
 create table if not exists public.supie_queue_once (
   queue text not null,
   key text not null,
@@ -231,14 +230,15 @@ as $$
   from pgmq.read_with_poll(queue, visibility, qty, max_poll_seconds, 100) as m
 $$;
 
--- Done with a message.
-create or replace function public.supie_queue_ack(queue text, msg_id bigint)
-returns boolean
+-- Done with messages: delete them in one call.
+drop function if exists public.supie_queue_ack(text, bigint);
+create or replace function public.supie_queue_ack(queue text, msg_ids bigint[])
+returns void
 language sql
 security definer
 set search_path = ''
 as $$
-  select pgmq.delete(queue, msg_id)
+  select from pgmq.delete(queue, msg_ids)
 $$;
 
 -- A failed attempt: make the message visible again after delay seconds.
@@ -305,6 +305,37 @@ begin
 end
 $$;
 
+-- Delete send keys and finished effects older than older_than, across all
+-- queues, and dead letters older than dead_older_than when given. Schedule it,
+-- e.g. select cron.schedule('supie-queue-prune', '0 3 * * *',
+-- 'select public.supie_queue_prune()');
+create or replace function public.supie_queue_prune(
+  older_than interval default '7 days', dead_older_than interval default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_keys bigint;
+  v_once bigint;
+  v_dead bigint := 0;
+begin
+  delete from public.supie_queue_keys as k where k.created_at < now() - older_than;
+  get diagnostics v_keys = row_count;
+  delete from public.supie_queue_once as o
+  where o.updated_at < now() - older_than
+    and (o.status = 'done' or o.lease_until < now());
+  get diagnostics v_once = row_count;
+  if dead_older_than is not null then
+    delete from public.supie_queue_dead as d where d.failed_at < now() - dead_older_than;
+    get diagnostics v_dead = row_count;
+  end if;
+  return jsonb_build_object('keys', v_keys, 'once', v_once, 'dead', v_dead);
+end
+$$;
+
 -- Queue length, oldest message age and the dead-letter count.
 create or replace function public.supie_queue_stats(queue text)
 returns jsonb
@@ -333,11 +364,12 @@ begin
     'supie_queue_once_finish(text, text, text, jsonb)',
     'supie_queue_once_release(text, text, text)',
     'supie_queue_read(text, integer, integer, integer)',
-    'supie_queue_ack(text, bigint)',
+    'supie_queue_ack(text, bigint[])',
     'supie_queue_retry(text, bigint, integer)',
     'supie_queue_kill(text, bigint, text)',
     'supie_queue_replay(bigint)',
-    'supie_queue_stats(text)'
+    'supie_queue_stats(text)',
+    'supie_queue_prune(interval, interval)'
   ] loop
     execute format('revoke execute on function public.%s from public, anon, authenticated', fn);
     execute format('grant execute on function public.%s to service_role', fn);
