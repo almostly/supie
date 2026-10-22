@@ -18,5 +18,6 @@
 - `supie build` reports the compressed size, close to what Supabase counts against the bundle limit.
 - ONNX models (`supie.onnx`), run by the Edge Runtime's native ONNX engine and loaded from Storage or a URL; under CPython they run with onnxruntime.
 - `supie model prepare` removes ZipMap outputs from classifier exports, which the engine can't return.
+- `supie model publish` takes an ONNX file, an MLflow model folder or an MLflow URI such as `models:/pd@champion`, prepares it and uploads it to a private Storage bucket.
 - `compare_digest` for constant-time comparison on every runtime, since MicroPython's `hmac` lacks it.
 - `supie.supabase.RateLimited` when Supabase refuses a call between functions (30 per trace and minute), instead of an untyped error and a 500.

@@ -115,3 +115,102 @@ def test_model_prepare_removes_zipmap(tmp_path, model_bytes):
     )
     assert out["probabilities"].shape == (1, 2)
     assert out["probabilities"][0][0] == pytest.approx(expected(0, 0), abs=1e-6)
+
+
+def test_resolve_mlflow_folder(tmp_path, model_bytes):
+    """An MLflow model folder resolves to the file its ONNX flavor names."""
+    from supie import models
+
+    (tmp_path / "model.onnx").write_bytes(model_bytes)
+    (tmp_path / "MLmodel").write_text("flavors:\n  onnx:\n    data: model.onnx\n")
+    assert models.resolve(str(tmp_path), tmp_path) == tmp_path / "model.onnx"
+    (tmp_path / "MLmodel").write_text("flavors:\n  catboost:\n    data: model.cb\n")
+    with pytest.raises(RuntimeError, match="no ONNX flavor"):
+        models.resolve(str(tmp_path), tmp_path)
+
+
+def test_publish_creates_bucket_and_uploads(tmp_path, model_bytes, monkeypatch):
+    """publish prepares the model, creates a private bucket and uploads with upsert."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from typer.testing import CliRunner
+
+    from supie.cli import app
+
+    seen = []
+
+    class Storage(BaseHTTPRequestHandler):
+        """A fake Storage API that has no buckets yet."""
+
+        def _reply(self, status, body):
+            """Send a JSON reply."""
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):  # noqa: N802
+            """Bucket lookups: not found."""
+            seen.append(("GET", self.path, self.headers["authorization"], None))
+            self._reply(400, {"error": "Bucket not found"})
+
+        def do_POST(self):  # noqa: N802
+            """Bucket creation and uploads."""
+            body = self.rfile.read(int(self.headers["content-length"]))
+            seen.append(("POST", self.path, self.headers.get("x-upsert"), body))
+            self._reply(200, {"ok": True})
+
+        def log_message(self, *args):
+            """Stay quiet."""
+
+    server = HTTPServer(("127.0.0.1", 0), Storage)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("SUPABASE_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-key")
+    model = tmp_path / "pd.onnx"
+    model.write_bytes(model_bytes)
+    try:
+        result = CliRunner().invoke(
+            app,
+            [
+                "model",
+                "publish",
+                str(model),
+                "--bucket",
+                "models",
+                "--path",
+                "pd/v1.onnx",
+            ],
+        )
+    finally:
+        server.shutdown()
+    assert result.exit_code == 0, result.output
+    assert (
+        "uploaded" in result.output
+        and 'Model.from_storage("models", "pd/v1.onnx")' in result.output
+    )
+    lookup, create, put = seen
+    assert lookup[:3] == ("GET", "/storage/v1/bucket/models", "Bearer service-key")
+    assert create[1] == "/storage/v1/bucket"
+    assert json.loads(create[3]) == {"id": "models", "name": "models", "public": False}
+    assert put[:3] == ("POST", "/storage/v1/object/models/pd/v1.onnx", "true")
+    onnxruntime = pytest.importorskip("onnxruntime")
+    assert onnxruntime.InferenceSession(put[3]).get_inputs()[0].name == "features"
+
+
+def test_publish_needs_credentials(tmp_path, monkeypatch):
+    """Without --project-ref or the environment, publish says what's missing."""
+    from typer.testing import CliRunner
+
+    from supie.cli import app
+
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    result = CliRunner().invoke(
+        app, ["model", "publish", "x.onnx", "--bucket", "b", "--path", "p"]
+    )
+    assert result.exit_code == 1 and "SUPABASE_SERVICE_ROLE_KEY" in result.output

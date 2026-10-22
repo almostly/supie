@@ -138,14 +138,18 @@ async def score(req: Request):
 
 `Model.from_storage` downloads the model as the service role, unless you pass a client. `Model.from_url(url, headers)` loads one from anywhere else. `run` takes nested lists of float32, or `{"data": ..., "type": "int64"}` for other types, and returns nested lists by output name. Under CPython, as in tests, models run with the `onnxruntime` package, and the test client's `fetch` serves the model file.
 
-Classifier exports from CatBoost, scikit-learn and others end in a ZipMap, which the engine can't return. Remove it before uploading:
+To get a model into Storage, publish it. The source can be an ONNX file, an MLflow model folder, or an MLflow URI, so a registry alias works:
 
 ```bash
-pip install 'supie[models]'
-supie model prepare pd.onnx pd-prepared.onnx
+pip install 'supie[models]' mlflow-skinny
+supie model publish models:/pd@champion --bucket models --path pd/v3.onnx --project-ref <ref>
 ```
 
-A CatBoost model of 1.6 MB, from a private bucket on hosted Supabase:
+`publish` downloads the model with MLflow and takes its ONNX flavor. It removes any ZipMap, the output classifier exports from CatBoost, scikit-learn and others end in, which the engine can't return. Then it uploads to the bucket, creating it as private if needed. The service role key comes from the Supabase CLI with `--project-ref`, or from `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. MLflow runs only here, at build time; the function never imports it. Log an ONNX copy next to the native model, for example with `mlflow.onnx.log_model`, and compare their predictions on a holdout set before promoting a new champion.
+
+`supie model prepare in.onnx out.onnx` does only the ZipMap step, locally.
+
+A CatBoost model of 1.6 MB, published from an MLflow registry alias to a private bucket on hosted Supabase:
 
 | | |
 |---|---|

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -200,3 +201,72 @@ def model_prepare(
     for change in changes or ["nothing to change"]:
         typer.echo(change)
     typer.echo(f"wrote {target}")
+
+
+def _service_credentials(project_ref: str | None) -> tuple[str, str]:
+    """The project URL and service role key: from --project-ref, or the environment."""
+    if project_ref:
+        if not shutil.which("supabase"):
+            _fail("--project-ref needs the Supabase CLI, logged in")
+        result = subprocess.run(
+            [
+                "supabase",
+                "projects",
+                "api-keys",
+                "--project-ref",
+                project_ref,
+                "-o",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        try:
+            keys = {k["name"]: k["api_key"] for k in json.loads(result.stdout)}
+        except (ValueError, KeyError, TypeError):
+            _fail(
+                f"couldn't read the API keys of {project_ref}: {result.stderr.strip()}"
+            )
+        if "service_role" not in keys:
+            _fail(f"{project_ref} has no service_role key")
+        return f"https://{project_ref}.supabase.co", keys["service_role"]
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not (url and key):
+        _fail("pass --project-ref, or set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY")
+    return url, key
+
+
+@model_app.command("publish")
+def model_publish(
+    source: str = typer.Argument(
+        ...,
+        help="An ONNX file, an MLflow model folder, or a URI such as models:/pd@champion.",
+    ),
+    bucket: str = typer.Option(
+        ..., "--bucket", help="The Storage bucket; created private if missing."
+    ),
+    path: str = typer.Option(
+        ..., "--path", help="Where in the bucket, such as pd/v3.onnx."
+    ),
+    project_ref: str = typer.Option(
+        None, "--project-ref", help="The Supabase project."
+    ),
+) -> None:
+    """Prepare a model and upload it to Storage, for Model.from_storage."""
+    import tempfile
+
+    from supie import models
+
+    url, key = _service_credentials(project_ref)
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            onnx_file = models.resolve(source, Path(tmp))
+            prepared = Path(tmp) / "prepared.onnx"
+            for change in models.prepare(onnx_file, prepared):
+                typer.echo(change)
+            target = models.upload(prepared, bucket, path, url, key)
+        except RuntimeError as error:
+            _fail(str(error))
+    typer.echo(f"uploaded {source} to {target}")
+    typer.echo(f'load it with: await Model.from_storage("{bucket}", "{path}")')

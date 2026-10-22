@@ -1006,6 +1006,7 @@ dependencies = [
 [package.optional-dependencies]
 models = [
     { name = "onnx" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -1015,11 +1016,13 @@ dev = [
     { name = "onnxruntime", marker = "python_full_version >= '3.11'" },
     { name = "openpyxl" },
     { name = "pytest" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "onnx", marker = "extra == 'models'", specifier = ">=1.17" },
+    { name = "pyyaml", marker = "extra == 'models'", specifier = ">=6" },
     { name = "tomlkit", specifier = ">=0.13" },
     { name = "typer", specifier = ">=0.12" },
 ]
@@ -1032,6 +1035,7 @@ dev = [
     { name = "onnxruntime", marker = "python_full_version >= '3.11'", specifier = ">=1.20" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pytest", specifier = ">=8" },
+    { name = "pyyaml", specifier = ">=6" },
 ]
 
 [[package]]

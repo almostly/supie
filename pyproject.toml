@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-models = ["onnx>=1.17"]  # supie model prepare
+models = ["onnx>=1.17", "pyyaml>=6"]  # supie model prepare and publish
 
 [project.scripts]
 supie = "supie.cli:app"
@@ -35,6 +35,7 @@ dev = [
     "pytest>=8",
     "openpyxl>=3.1",  # writes the workbook the edge package test uploads
     "onnx>=1.17",  # builds the tiny model the ONNX tests serve
+    "pyyaml>=6",  # reads MLmodel files in the publish tests
     # runs ONNX models in tests, standing in for the Edge Runtime; no wheels for 3.10
     "onnxruntime>=1.20; python_version >= '3.11'",
     "commitizen>=4",
