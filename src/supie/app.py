@@ -229,6 +229,66 @@ async def _maybe_await(value):
     return value
 
 
+class Timeout(Exception):
+    """An awaitable passed to wait_for didn't finish in time."""
+
+
+async def sleep(seconds):
+    """Wait without blocking other requests or tasks."""
+    await get_host().sleep(int(seconds * 1000))
+
+
+async def gather(*tasks):
+    """Run awaitables concurrently and return their results in order.
+
+    Every task runs to the end; if any raised, the first error is raised after.
+    """
+    results = [None] * len(tasks)
+    errors = [None] * len(tasks)
+
+    async def one(i, task):
+        """Run one task, keeping its result or error for after the others."""
+        try:
+            results[i] = await task
+        except Exception as error:
+            errors[i] = error
+
+    await get_host().gather(*[one(i, task) for i, task in enumerate(tasks)])
+    for error in errors:
+        if error is not None:
+            raise error
+    return results
+
+
+async def wait_for(task, seconds):
+    """Await task, raising Timeout if it takes longer than seconds.
+
+    In the function the task can't be cancelled: it keeps running, and its
+    result is dropped.
+    """
+    state = {"done": False, "value": None, "error": None}
+
+    async def body():
+        """Run the task and record how it ended."""
+        try:
+            state["value"] = await task
+        except Exception as error:
+            state["error"] = error
+        state["done"] = True
+
+    await get_host().race(body(), get_host().sleep(int(seconds * 1000)))
+    if not state["done"]:
+        raise Timeout("timed out after " + str(seconds) + " s")
+    if state["error"] is not None:
+        raise state["error"]
+    return state["value"]
+
+
+def new_id():
+    """A random 128-bit hex ID from the platform's CSPRNG."""
+    return str(get_host().uuid())
+
+
 def format_exception(error):
     """Format a traceback under CPython or MicroPython."""
     try:

@@ -110,6 +110,95 @@ data = await req.supabase_admin.storage.from_("models").download("scorecard.json
 
 The query builder covers `select`, `insert`, `upsert`, `update`, `delete`, the filters `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `ilike`, `is_` and `in_`, plus `filter`, `order`, `limit`, `offset` and `single`. A failed call raises `supie.supabase.SupabaseError` with the status and message.
 
+## Workflows
+
+A `Flow` chains steps, like AWS Step Functions over your edge functions. Steps run as soon as their dependencies are done, so independent ones run in parallel. Every finished step is saved, so a run can resume where it stopped, and the saved steps double as an audit trail.
+
+```python
+from supie import App, Request
+from supie.flow import Flow
+
+app = App()
+scoring = Flow("scoring")
+
+
+@scoring.step(retries=2, timeout=5)
+async def bureau(ctx, application):
+    return await ctx.invoke("bureau-fetch", application)  # another edge function
+
+
+@scoring.step(timeout=5)
+async def fraud(ctx, application):
+    return await ctx.invoke("fraud-check", application)
+
+
+@scoring.step(depends_on=[bureau, fraud])
+def score(ctx, application, bureau, fraud):
+    return {"pd": model(application, bureau), "fraud": fraud["flag"]}
+
+
+@scoring.step(depends_on=[score])
+def decide(ctx, application, score):
+    if score["fraud"]:
+        return ctx.goto(manual_review)
+    return {"decision": "approve" if score["pd"] < 0.08 else "decline"}
+
+
+@scoring.branch(depends_on=[score])
+async def manual_review(ctx, application, score):
+    await ctx.supabase.table("review_queue").insert({"application": application}).execute()
+    return {"decision": "refer"}
+
+
+@app.post("/decide")
+async def decide_now(req: Request):
+    result = await scoring.run(req.json(), request=req)  # inside the request
+    return result.output
+
+
+scoring.mount(app, "/flows/scoring")  # or start runs in the background
+```
+
+- **Steps.** A step receives a context, the flow's input and its dependencies' outputs, in the order of `depends_on`. It can be sync or async, and must return something JSON can hold.
+- **Retries and timeouts.** `retries` adds attempts after a failure, waiting `backoff`, then twice that, and so on. `timeout` fails an async step that runs too long. When the attempts run out, the step and the run are saved as failed and `run` raises `StepFailed`.
+- **Branches.** A step returns `ctx.goto(branch)` to hand its result to a branch. Branches run only when a step goes to them, like a Choice state.
+- **The result.** It's the last step's output. A flow that ends in several steps returns a dict of them.
+- **Context.** `ctx` has `run_id`, `step`, `attempt`, `supabase` (as the caller when the run came from a request), `supabase_admin` and `invoke(name, body)` for calling other edge functions.
+- **Resuming.** Run the same run ID again with `scoring.run(None, run_id=...)`. Saved steps are skipped and the saved input is used.
+
+`scoring.mount(app, prefix)` adds these endpoints:
+
+| Endpoint | What it does |
+|---|---|
+| `POST <prefix>` | Starts a run with the JSON body as input, answering 202 with its `run_id`. The run continues after the response. |
+| `GET <prefix>/<run_id>` | Returns the status, output, error and every saved step. |
+| `POST <prefix>/<run_id>/resume` | Continues a run whose worker stopped. |
+| `POST <prefix>/resume-stale?idle=300` | For the service role: resumes every run idle that long. Call it from pg_cron. |
+
+A run started by a signed-in user is visible only to that user and the service role. Anyone else holding the random run ID can read a run started anonymously.
+
+### Where checkpoints live
+
+By default, checkpoints go to two tables in your project. Create them once:
+
+```bash
+supie flow migration   # writes supabase/migrations/<timestamp>_supie_flows.sql
+supabase db push
+```
+
+Only the service role can read or write those tables. For tests, pass `Flow("scoring", MemoryStore())` from `supie.flow`. The memory store only lasts as long as one worker, and hosted Supabase rarely reuses workers, so mounted flows need the tables.
+
+A background run lives as long as its worker: up to 150 s on the free plan and 400 s on paid plans. Waiting on I/O, such as another function, doesn't count against the 2 s CPU budget. For longer runs, resume stale ones on a schedule:
+
+```sql
+select cron.schedule('resume-scoring', '* * * * *', $$
+  select net.http_post(
+    url := 'https://<project>.supabase.co/functions/v1/<function>/flows/scoring/resume-stale',
+    headers := jsonb_build_object('Authorization', 'Bearer ' || '<service role key>')
+  )
+$$);
+```
+
 ## Testing
 
 Handlers are plain Python, so you test them with pytest and no Supabase at all:
@@ -126,6 +215,8 @@ def test_score():
     assert response.status == 201
     assert client.calls == []  # every request the handler made through Supabase
 ```
+
+To test a flow outside a request, `supie.testing.run(flow.run(input), sleep_scale=0)` binds a fake host and skips retry delays.
 
 `TestClient` runs background tasks after each response. Its `fetch` answers the Supabase client's requests, and `client.calls` records them. By default, an unexpected error fails the test with its traceback instead of returning a 500.
 
@@ -168,11 +259,14 @@ Two workarounds are built in: Supabase's runtime refuses shared WebAssembly memo
 - **No direct Postgres connection.** Use the Supabase client, or an RPC for raw SQL.
 - **Text request bodies only.** Binary request bodies are not supported yet. Responses and Storage handle bytes.
 - **No watch mode.** `supie serve` doesn't rebuild on file changes yet.
+- **Flows run inside one worker.** A worker that stops mid-run leaves the run for `resume-stale`. A pgflow-backed mode, where Postgres schedules each step, is planned.
 
 ## Development
 
 ```bash
 uv sync
-uv run pytest -m "not edge"   # unit tests
-uv run pytest -m edge         # functions on the Edge Runtime image, needs Docker
+uv run pytest -m "not edge and not postgres"   # unit tests
+uv run pytest -m "edge or postgres"   # Edge Runtime, Postgres and PostgREST images, needs Docker
 ```
+
+CI runs the Docker tests against pinned images. A weekly workflow runs them against the images the Supabase CLI ships that day, so a new Edge Runtime, Postgres or PostgREST release that breaks supie shows up before users hit it.

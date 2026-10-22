@@ -1,5 +1,6 @@
 # Lint and tests on every pull request and on main. The edge job builds
-# functions with both runtimes and runs them on Supabase's Edge Runtime image.
+# functions with both runtimes, runs them on Supabase's Edge Runtime image, and
+# tests workflow checkpoints against Supabase's Postgres and PostgREST.
 name: ci
 
 on:
@@ -36,13 +37,15 @@ jobs:
         run: uvx prek run --all-files --show-diff-on-failure
 
       - name: Tests
-        run: uv run pytest -q -m "not edge"
+        run: uv run pytest -q -m "not edge and not postgres"
 
       - name: Example
         run: uv run pytest -q examples
 
   edge:
-    name: edge runtime (micropython, pyodide)
+    # Against the images pinned in tests/conftest.py, so a failure here means our
+    # change broke something. upstream.yml tests what Supabase ships today.
+    name: edge runtime and postgres (pinned images)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,8 +56,5 @@ jobs:
       - name: Install the project
         run: uv sync --locked
 
-      - name: Pull the Edge Runtime image
-        run: docker pull public.ecr.aws/supabase/edge-runtime:v1.77.4
-
-      - name: Edge tests
-        run: uv run pytest -q -m edge
+      - name: Edge Runtime and Postgres tests
+        run: uv run pytest -q -m "edge or postgres"

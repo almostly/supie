@@ -45,6 +45,16 @@ const host = {
   },
 };
 
+// Concurrency for supie.app.gather and wait_for: Python hands over coroutines,
+// which both runtimes turn into thenables, and gets None back. Plus random IDs
+// from the platform's CSPRNG.
+Object.assign(host, {
+  gather: (...tasks: Promise<unknown>[]) => Promise.all(tasks).then(() => null),
+  race: (...tasks: Promise<unknown>[]) => Promise.race(tasks).then(() => null),
+  sleep: (ms: number) => new Promise((resolve) => setTimeout(() => resolve(null), ms)),
+  uuid: () => crypto.randomUUID().replaceAll("-", ""),
+});
+
 const t0 = performance.now();
 const py = await loadPython(here);
 py.registerJsModule("_supie_host", host);

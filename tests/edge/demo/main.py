@@ -25,7 +25,7 @@ def root(req: Request) -> dict[str, Any]:
 
 
 @app.post("/score/{applicant:int}")
-def score(req: Request, applicant: int):
+def score_applicant(req: Request, applicant: int):
     """A path parameter, a JSON body and a helper module."""
     body = req.json()
     if "age" not in body:
@@ -81,3 +81,59 @@ def later(req: Request):
 def boom(req: Request):
     """An unexpected error."""
     return 1 / 0
+
+
+# A workflow, with checkpoints kept in the worker's memory.
+from supie import sleep  # noqa: E402
+from supie.flow import Flow, MemoryStore  # noqa: E402
+
+scoring = Flow("scoring", MemoryStore())
+
+
+@scoring.step()
+async def bureau(ctx, application):
+    """A slow check."""
+    await sleep(0.2)
+    return {"score": 700}
+
+
+@scoring.step()
+async def fraud(ctx, application):
+    """Another slow check, in parallel with bureau."""
+    await sleep(0.2)
+    return {"flag": application.get("suspicious", False)}
+
+
+@scoring.step(depends_on=[bureau, fraud], retries=2, backoff=0.01)
+def score(ctx, application, bureau, fraud):
+    """Fails on the first attempt, to exercise retries."""
+    if ctx.attempt == 1:
+        raise RuntimeError("flaky")
+    return {"pd": 0.02, "fraud": fraud["flag"], "attempts": ctx.attempt}
+
+
+@scoring.step(depends_on=[score])
+def decide(ctx, application, score):
+    """Approve, or hand over to review."""
+    if score["fraud"]:
+        return ctx.goto(review)
+    return {"decision": "approve", "attempts": score["attempts"]}
+
+
+@scoring.branch(depends_on=[score])
+def review(ctx, application, score):
+    """Only when decide goes here."""
+    return {"decision": "refer"}
+
+
+@app.post("/decide")
+async def decide_now(req: Request):
+    """Run the flow inside the request and time it."""
+    import time
+
+    started = time.time()
+    result = await scoring.run(req.json(), request=req)
+    return {"output": result.output, "seconds": time.time() - started}
+
+
+scoring.mount(app, "/flows/scoring")

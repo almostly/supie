@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
@@ -18,6 +19,8 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+flow_app = typer.Typer(help="Workflows: the tables that keep their checkpoints.")
+app.add_typer(flow_app, name="flow")
 
 Root = typer.Option(
     Path("."), "--root", help="The project folder, with supabase/ in it."
@@ -160,3 +163,19 @@ def deploy(
     if project_ref:
         args += ["--project-ref", project_ref]
     _supabase(args, project.root)
+
+
+@flow_app.command("migration")
+def flow_migration(root: Path = Root) -> None:
+    """Write the migration for the workflow tables to supabase/migrations/."""
+    project = build.load_project(root)
+    migrations = project.supabase / "migrations"
+    existing = sorted(migrations.glob("*_supie_flows.sql"))
+    if existing:
+        _fail(f"{existing[-1]} already exists")
+    migrations.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    path = migrations / f"{stamp}_supie_flows.sql"
+    path.write_text(resources.files("supie").joinpath("sql", "flows.sql").read_text())
+    typer.echo(f"wrote {path.relative_to(project.root)}")
+    typer.echo("next: `supabase db push` (or `supabase migration up` locally)")

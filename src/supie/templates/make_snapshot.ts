@@ -29,7 +29,7 @@ await walk(appDir);
 py.runPython(`
 import sys
 sys.path.insert(0, "/app")
-import json, supie, supie.app, supie.supabase
+import json, supie, supie.app, supie.supabase, supie.flow
 ${modules ? `import ${modules}` : ""}
 `);
 await Deno.writeFile(out, py.makeMemorySnapshot());

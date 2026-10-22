@@ -53,6 +53,7 @@ testpaths = ["tests"]
 markers = [
     "network: downloads a runtime from npm (cached after the first run)",
     "edge: runs functions on Supabase's Edge Runtime image (Docker)",
+    "postgres: runs against Supabase's Postgres and PostgREST images (Docker)",
 ]
 
 [tool.commitizen]

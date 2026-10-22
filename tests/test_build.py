@@ -118,3 +118,13 @@ def test_integrity_check():
     from supie.runtimes import RUNTIMES, verify
 
     assert not verify(b"tampered", RUNTIMES["micropython"].integrity)
+
+
+def test_flow_migration(project):
+    """flow migration writes the tables' SQL once."""
+    result = cli("flow", "migration", "--root", project)
+    assert result.exit_code == 0, result.output
+    (path,) = (project / "supabase" / "migrations").glob("*_supie_flows.sql")
+    assert "create table if not exists public.supie_flow_runs" in path.read_text()
+    again = cli("flow", "migration", "--root", project)
+    assert again.exit_code == 1 and "already exists" in again.output

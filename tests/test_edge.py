@@ -21,7 +21,6 @@ from supie import build
 
 pytestmark = [pytest.mark.edge, pytest.mark.network]
 
-IMAGE = "public.ecr.aws/supabase/edge-runtime:v1.77.4"
 HERE = Path(__file__).parent / "edge"
 FUNCTIONS = ["demo", "demo-pyodide"]
 
@@ -34,7 +33,7 @@ def _free_port():
 
 
 @pytest.fixture(scope="module")
-def edge(tmp_path_factory):
+def edge(tmp_path_factory, images):
     """Build the demo function both ways and serve them from the Edge Runtime."""
     if not shutil.which("docker") or subprocess.call(
         ["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -66,7 +65,7 @@ def edge(tmp_path_factory):
             f"{root / 'supabase' / 'functions'}:/home/deno/functions:ro",
             "-v",
             f"{HERE / 'main'}:/home/deno/main:ro",
-            IMAGE,
+            images["edge"],
             "start",
             "--main-service",
             "/home/deno/main",
@@ -187,3 +186,32 @@ def test_background_and_errors(edge, fn):
     assert "background done" in text
     assert "ZeroDivisionError" in text
     assert '"event":"supie.boot"' in text
+
+
+@pytest.mark.parametrize("fn", FUNCTIONS)
+def test_flow_inline(edge, fn):
+    """A flow runs in the request: parallel checks, a retry, and a branch."""
+    status, _, body = call(edge, "POST", f"/{fn}/decide", {"id": 1})
+    assert status == 200, body
+    result = json.loads(body)
+    assert result["output"] == {"decision": "approve", "attempts": 2}
+    assert result["seconds"] < 0.39  # the two 0.2 s checks overlapped
+    status, _, body = call(edge, "POST", f"/{fn}/decide", {"id": 2, "suspicious": True})
+    assert json.loads(body)["output"] == {"decision": "refer"}
+
+
+@pytest.mark.parametrize("fn", FUNCTIONS)
+def test_flow_mounted(edge, fn):
+    """POST starts a run in the background; GET shows it finished."""
+    status, headers, body = call(edge, "POST", f"/{fn}/flows/scoring", {"id": 3})
+    assert status == 202, body
+    run_id = json.loads(body)["run_id"]
+    assert len(run_id) == 32
+    for _ in range(50):
+        status, _, body = call(edge, "GET", f"/{fn}/flows/scoring/{run_id}")
+        if json.loads(body)["status"] != "running":
+            break
+        time.sleep(0.1)
+    state = json.loads(body)
+    assert state["status"] == "succeeded", state
+    assert set(state["steps"]) == {"bureau", "fraud", "score", "decide"}

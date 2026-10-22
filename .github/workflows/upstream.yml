@@ -1,0 +1,42 @@
+# Weekly, and on demand: run the edge and postgres tests against the images the
+# Supabase CLI ships right now, read from its Dockerfile. CI pins versions so
+# its failures always mean our change broke something; this job catches a new
+# Edge Runtime, Postgres or PostgREST release breaking supie before users do.
+# When it passes on new versions, bump the pins in tests/conftest.py.
+name: upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays, 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Supabase CLI branch to read the image pins from"
+        default: develop
+
+permissions:
+  contents: read
+
+jobs:
+  latest:
+    name: edge runtime and postgres (Supabase CLI's current images)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install the project
+        run: uv sync --locked
+
+      - name: Read the Supabase CLI's images
+        run: |
+          uv run python scripts/supabase_images.py "${{ inputs.branch || 'develop' }}" | tee -a "$GITHUB_ENV"
+          {
+            echo "### Images under test"
+            uv run python scripts/supabase_images.py "${{ inputs.branch || 'develop' }}" | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Edge Runtime and Postgres tests
+        run: uv run pytest -q -m "edge or postgres"

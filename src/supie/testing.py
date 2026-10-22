@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json as jsonlib
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -66,10 +67,30 @@ class FakeHost:
         self.vars = dict(env or {})
         self.handler = fetch
         self.calls: list[Call] = []
+        self.sleep_scale = 1.0
 
     def env(self, name: str) -> str | None:
         """Return an environment variable, or None."""
         return self.vars.get(name)
+
+    async def gather(self, *tasks: Any) -> None:
+        """Run tasks concurrently, as the shim's Promise.all does."""
+        await asyncio.gather(*tasks)
+
+    async def race(self, *tasks: Any) -> None:
+        """Wait for the first task to finish and cancel the rest."""
+        pending = [asyncio.ensure_future(task) for task in tasks]
+        _, rest = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in rest:
+            task.cancel()
+
+    async def sleep(self, ms: int) -> None:
+        """Sleep, scaled by sleep_scale so retry delays don't slow tests down."""
+        await asyncio.sleep(ms / 1000 * self.sleep_scale)
+
+    def uuid(self) -> str:
+        """A random hex ID."""
+        return uuid.uuid4().hex
 
     async def fetch(
         self,
@@ -146,6 +167,7 @@ class TestClient:
         self.app = app
         self.host = FakeHost({**DEFAULT_ENV, **(env or {})}, fetch)
         self.raise_errors = raise_errors
+        self.sleep_scale = 1.0  # shrink retry delays: 0 skips them
 
     @property
     def calls(self) -> list[Call]:
@@ -183,6 +205,7 @@ class TestClient:
     async def _send(self, raw: str) -> TestResponse:
         """Dispatch with the fake host bound, then run any background tasks."""
         runtime.set_host(self.host)
+        self.host.sleep_scale = self.sleep_scale
         try:
             wire = jsonlib.loads(await runtime.dispatch(self.app, raw))
             if wire["log"] and self.raise_errors:
@@ -214,3 +237,27 @@ class TestClient:
     def delete(self, path: str, **kwargs: Any) -> TestResponse:
         """Send a DELETE request."""
         return self.request("DELETE", path, **kwargs)
+
+
+def run(
+    awaitable: Any,
+    env: dict[str, str] | None = None,
+    fetch: Handler | None = None,
+    sleep_scale: float = 1.0,
+) -> Any:
+    """Await something that needs the host, such as flow.run(...), outside a request.
+
+    sleep_scale shrinks sleeps (retry delays); 0 skips them.
+    """
+    host = FakeHost({**DEFAULT_ENV, **(env or {})}, fetch)
+    host.sleep_scale = sleep_scale
+
+    async def bound() -> Any:
+        """Await with the fake host bound."""
+        runtime.set_host(host)
+        try:
+            return await awaitable
+        finally:
+            runtime.set_host(None)
+
+    return asyncio.run(bound())

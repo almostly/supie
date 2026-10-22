@@ -11,3 +11,5 @@
 - `supie.testing.TestClient` for testing handlers under CPython with a fake environment and fetch.
 - Edge Runtime fixes built into the generated shim: shared WebAssembly memory and `setImmediate` for Pyodide, the Node file path and `Buffer` for MicroPython.
 - `typing` and `__future__` stand-ins for MicroPython.
+- Workflows (`supie.flow`): steps with dependencies, parallel execution, retries, timeouts and `goto` branches, checkpointed per run in Supabase tables (`supie flow migration`) or in memory, with endpoints to start, inspect and resume runs.
+- `gather`, `wait_for` and `sleep` for concurrency inside handlers.
