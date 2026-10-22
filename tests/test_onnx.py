@@ -62,7 +62,7 @@ def test_missing_model_fails_boot():
     )
     response = client.post("/score", json={"rows": [[0, 0]]})
     assert response.status == 500
-    assert "HTTP 404" in response.log
+    assert response.log and "HTTP 404" in response.log
 
 
 def test_model_prepare_removes_zipmap(tmp_path, model_bytes):
@@ -107,14 +107,17 @@ def test_model_prepare_removes_zipmap(tmp_path, model_bytes):
     assert result.exit_code == 0, result.output
     assert "ZipMap replaced" in result.output
     session = onnxruntime.InferenceSession(str(target))
+    import numpy
+
     out = dict(
         zip(
             [o.name for o in session.get_outputs()],
             session.run(None, {"features": [[0.0, 0.0]]}),
         )
     )
-    assert out["probabilities"].shape == (1, 2)
-    assert out["probabilities"][0][0] == pytest.approx(expected(0, 0), abs=1e-6)
+    probabilities = numpy.asarray(out["probabilities"])
+    assert probabilities.shape == (1, 2)
+    assert probabilities[0][0] == pytest.approx(expected(0, 0), abs=1e-6)
 
 
 def test_resolve_mlflow_folder(tmp_path, model_bytes):
@@ -164,7 +167,7 @@ def test_publish_creates_bucket_and_uploads(tmp_path, model_bytes, monkeypatch):
             seen.append(("POST", self.path, self.headers.get("x-upsert"), body))
             self._reply(200, {"ok": True})
 
-        def log_message(self, *args):
+        def log_message(self, format: str, *args: object) -> None:
             """Stay quiet."""
 
     server = HTTPServer(("127.0.0.1", 0), Storage)

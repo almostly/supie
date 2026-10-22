@@ -18,7 +18,7 @@ WANTED = {
 }
 
 
-def main(branch="develop"):
+def main(branch: str = "develop") -> None:
     """Read the CLI's Dockerfile and print one public ECR image per variable."""
     with urllib.request.urlopen(
         DOCKERFILE.format(branch=branch), timeout=30

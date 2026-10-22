@@ -155,7 +155,7 @@ def test_unexpected_error():
         500,
         {"error": "Internal Server Error"},
     )
-    assert "ValueError: kaboom" in response.log
+    assert response.log and "ValueError: kaboom" in response.log
 
 
 def test_unexpected_error_fails_tests(client):
@@ -184,7 +184,7 @@ def test_missing_secret():
     """A secret that isn't set fails boot with a KeyError, logged as a 500."""
     response = TestClient(make_app(), raise_errors=False).get("/")
     assert response.status == 500
-    assert "KeyError" in response.log
+    assert response.log and "KeyError" in response.log
 
 
 def test_bad_route():

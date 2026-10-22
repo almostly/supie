@@ -165,14 +165,14 @@ def collect_files(
     if runtime == "micropython":
         for name in STUBS:
             if name not in text:
-                stub = resources.files("supie").joinpath("stubs", name)
+                stub = resources.files("supie").joinpath("stubs").joinpath(name)
                 text[name] = stub.read_text()
     return text, binary
 
 
 def _template(name: str, **values: object) -> str:
     """Read a template and fill in its __PLACEHOLDERS__."""
-    text = resources.files("supie").joinpath("templates", name).read_text()
+    text = resources.files("supie").joinpath("templates").joinpath(name).read_text()
     for key, value in {"VERSION": __version__, **values}.items():
         text = text.replace(f"__{key}__", str(value))
     return text

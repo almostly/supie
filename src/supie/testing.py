@@ -62,7 +62,9 @@ Handler = Callable[[Call], FakeResponse]
 class FakeHost:
     """Stands in for the shim: environment variables and a fetch you control."""
 
-    def __init__(self, env: dict[str, str] | None = None, fetch: Handler | None = None):
+    def __init__(
+        self, env: dict[str, str] | None = None, fetch: Handler | None = None
+    ) -> None:
         """Use these variables, and answer fetches with the handler (404 without one)."""
         self.vars = dict(env or {})
         self.handler = fetch

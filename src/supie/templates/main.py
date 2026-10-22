@@ -6,13 +6,13 @@ app = App()
 
 
 @app.get("/")
-def hello(req: Request):
+def hello(req: Request) -> dict[str, str]:
     """Say hello, by name when one is given."""
     return {"hello": req.query.get("name", "world")}
 
 
 @app.post("/echo")
-def echo(req: Request):
+def echo(req: Request) -> dict[str, object]:
     """Return the JSON body, which must be an object."""
     body = req.json()
     if not isinstance(body, dict):

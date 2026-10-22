@@ -177,7 +177,8 @@ def test_missing_supabase_env():
     app.get("/")(handler)
     client = TestClient(app, raise_errors=False)
     client.host.vars.pop("SUPABASE_URL")
-    assert "KeyError" in client.get("/").log
+    log = client.get("/").log
+    assert log and "KeyError" in log
 
 
 @pytest.mark.parametrize(

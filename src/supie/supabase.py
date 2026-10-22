@@ -5,9 +5,23 @@ the common calls: table queries, RPC, Edge Function calls and Storage. It keeps 
 the subset of Python that supie.app uses, so it runs under MicroPython too.
 """
 
+from __future__ import annotations
+
 import json
+from typing import TYPE_CHECKING, Any
 
 from supie.app import get_host
+
+if TYPE_CHECKING:
+    from typing import TypedDict
+
+    class Wire(TypedDict):
+        """A response as the shim's fetch reports it."""
+
+        status: int
+        headers: dict[str, str]
+        body: str
+
 
 _UNRESERVED = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
 
@@ -15,7 +29,7 @@ _UNRESERVED = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.
 class SupabaseError(Exception):
     """A Supabase API call failed; status and message come from the response."""
 
-    def __init__(self, status, message, details=None):
+    def __init__(self, status: int, message: Any, details: Any = None) -> None:
         """Store the HTTP status, the error message and the raw error body."""
         super().__init__(str(status) + ": " + str(message))
         self.status = status
@@ -31,13 +45,13 @@ class RateLimited(SupabaseError):
     seconds.
     """
 
-    def __init__(self, message, retry_after=None):
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
         """Store the message and how long to wait, when Supabase says."""
         super().__init__(429, message)
         self.retry_after = retry_after
 
 
-def _retry_after(message):
+def _retry_after(message: str) -> float | None:
     """Parse "Retry after 59971ms" into seconds, or None."""
     marker = "Retry after "
     if marker not in message:
@@ -53,14 +67,14 @@ def _retry_after(message):
 class Result:
     """The outcome of a query: the rows (or object) and, when asked for, the count."""
 
-    def __init__(self, data, count=None, status=200):
+    def __init__(self, data: Any, count: int | None = None, status: int = 200) -> None:
         """Store the data, the count and the HTTP status."""
         self.data = data
         self.count = count
         self.status = status
 
 
-def quote(text, safe=""):
+def quote(text: object, safe: str = "") -> str:
     """Percent-encode text for a URL, leaving unreserved characters and safe as is."""
     keep = _UNRESERVED + safe.encode()
     out = []
@@ -72,7 +86,7 @@ def quote(text, safe=""):
     return "".join(out)
 
 
-def _value(value):
+def _value(value: object) -> str:
     """Format a filter value the way PostgREST expects."""
     if value is True:
         return "true"
@@ -83,7 +97,7 @@ def _value(value):
     return str(value)
 
 
-def _list_value(value):
+def _list_value(value: object) -> str:
     """Format one item of an in.(...) list, quoting it when it has reserved characters."""
     text = _value(value)
     for char in ',()"':
@@ -92,7 +106,14 @@ def _list_value(value):
     return text
 
 
-async def fetch(method, url, headers, body=None, body_base64=False, want_base64=False):
+async def fetch(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: str | None = None,
+    body_base64: bool = False,
+    want_base64: bool = False,
+) -> Wire:
     """Call the shim's fetch and return status, headers and body as a dict.
 
     Raises RateLimited when Supabase refuses a call between functions, and
@@ -111,7 +132,7 @@ async def fetch(method, url, headers, body=None, body_base64=False, want_base64=
     return response
 
 
-def _error(response):
+def _error(response: Wire) -> SupabaseError:
     """Build a SupabaseError from an error response."""
     message = response["body"]
     details = None
@@ -124,7 +145,7 @@ def _error(response):
     return SupabaseError(response["status"], message, details)
 
 
-def _decode(response):
+def _decode(response: Wire) -> Any:
     """Parse a JSON body, or return the text when it isn't JSON."""
     if not response["body"]:
         return None
@@ -136,7 +157,7 @@ def _decode(response):
 class Supabase:
     """A client for one project, with a key and the bearer token to send."""
 
-    def __init__(self, url, key, token=None):
+    def __init__(self, url: str, key: str, token: str | None = None) -> None:
         """Store the project URL, the API key and the token for Authorization."""
         self.url = url.rstrip("/")
         self.key = key
@@ -144,20 +165,20 @@ class Supabase:
         self.functions = Functions(self)
         self.storage = Storage(self)
 
-    def headers(self, extra=None):
+    def headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         """The apikey and Authorization headers, plus any extra ones."""
         headers = {"apikey": self.key, "authorization": "Bearer " + self.token}
         if extra:
             headers.update(extra)
         return headers
 
-    def table(self, name):
+    def table(self, name: str) -> Query:
         """Start a query on a table or view."""
         return Query(self, name)
 
     from_ = table
 
-    async def rpc(self, fn, params=None):
+    async def rpc(self, fn: str, params: dict[str, Any] | None = None) -> Result:
         """Call a Postgres function through PostgREST."""
         response = await fetch(
             "POST",
@@ -173,25 +194,25 @@ class Supabase:
 class Query:
     """A PostgREST query, built step by step and sent by execute()."""
 
-    def __init__(self, client, table):
+    def __init__(self, client: Supabase, table: str) -> None:
         """Start a plain select on the table."""
         self.client = client
         self.table = table
         self.method = "GET"
-        self.params = []
-        self.prefer = []
-        self.body = None
-        self.columns = None
+        self.params: list[tuple[str, str]] = []
+        self.prefer: list[str] = []
+        self.body: str | None = None
+        self.columns: str | None = None
         self.single_row = False
 
-    def select(self, columns="*", count=None):
+    def select(self, columns: str = "*", count: str | None = None) -> Query:
         """Choose the columns to return; count may be "exact", "planned" or "estimated"."""
         self.columns = columns
         if count:
             self.prefer.append("count=" + count)
         return self
 
-    def _write(self, method, body, prefer):
+    def _write(self, method: str, body: Any, prefer: list[str]) -> Query:
         """Turn the query into a write that returns the affected rows."""
         self.method = method
         self.body = None if body is None else json.dumps(body)
@@ -199,73 +220,80 @@ class Query:
         self.prefer.extend(prefer)
         return self
 
-    def insert(self, rows):
+    def insert(self, rows: dict[str, Any] | list[dict[str, Any]]) -> Query:
         """Insert one row (a dict) or several (a list of dicts)."""
         return self._write("POST", rows, [])
 
-    def upsert(self, rows, on_conflict=None, ignore_duplicates=False):
+    def upsert(
+        self,
+        rows: dict[str, Any] | list[dict[str, Any]],
+        on_conflict: str | None = None,
+        ignore_duplicates: bool = False,
+    ) -> Query:
         """Insert rows, updating (or skipping) the ones that conflict."""
         if on_conflict:
             self.params.append(("on_conflict", on_conflict))
         resolution = "ignore-duplicates" if ignore_duplicates else "merge-duplicates"
         return self._write("POST", rows, ["resolution=" + resolution])
 
-    def update(self, values):
+    def update(self, values: dict[str, Any]) -> Query:
         """Update the rows the filters match."""
         return self._write("PATCH", values, [])
 
-    def delete(self):
+    def delete(self) -> Query:
         """Delete the rows the filters match."""
         return self._write("DELETE", None, [])
 
-    def filter(self, column, operator, value):
+    def filter(self, column: str, operator: str, value: object) -> Query:
         """Add a raw PostgREST filter such as ("age", "gte", 18)."""
         self.params.append((column, operator + "." + _value(value)))
         return self
 
-    def eq(self, column, value):
+    def eq(self, column: str, value: object) -> Query:
         """Keep rows where column equals value."""
         return self.filter(column, "eq", value)
 
-    def neq(self, column, value):
+    def neq(self, column: str, value: object) -> Query:
         """Keep rows where column differs from value."""
         return self.filter(column, "neq", value)
 
-    def gt(self, column, value):
+    def gt(self, column: str, value: object) -> Query:
         """Keep rows where column is greater than value."""
         return self.filter(column, "gt", value)
 
-    def gte(self, column, value):
+    def gte(self, column: str, value: object) -> Query:
         """Keep rows where column is at least value."""
         return self.filter(column, "gte", value)
 
-    def lt(self, column, value):
+    def lt(self, column: str, value: object) -> Query:
         """Keep rows where column is less than value."""
         return self.filter(column, "lt", value)
 
-    def lte(self, column, value):
+    def lte(self, column: str, value: object) -> Query:
         """Keep rows where column is at most value."""
         return self.filter(column, "lte", value)
 
-    def like(self, column, pattern):
+    def like(self, column: str, pattern: str) -> Query:
         """Keep rows where column matches a LIKE pattern."""
         return self.filter(column, "like", pattern)
 
-    def ilike(self, column, pattern):
+    def ilike(self, column: str, pattern: str) -> Query:
         """Keep rows where column matches a case-insensitive LIKE pattern."""
         return self.filter(column, "ilike", pattern)
 
-    def is_(self, column, value):
+    def is_(self, column: str, value: object) -> Query:
         """Keep rows where column IS value: None, True or False."""
         return self.filter(column, "is", value)
 
-    def in_(self, column, values):
+    def in_(self, column: str, values: list[Any] | tuple[Any, ...]) -> Query:
         """Keep rows where column is one of values."""
         items = ",".join(_list_value(v) for v in values)
         self.params.append((column, "in.(" + items + ")"))
         return self
 
-    def order(self, column, desc=False, nullsfirst=None):
+    def order(
+        self, column: str, desc: bool = False, nullsfirst: bool | None = None
+    ) -> Query:
         """Sort by column; call again to add more sort keys."""
         term = column + (".desc" if desc else ".asc")
         if nullsfirst is not None:
@@ -273,22 +301,22 @@ class Query:
         self.params.append(("order", term))
         return self
 
-    def limit(self, count):
+    def limit(self, count: int) -> Query:
         """Return at most count rows."""
         self.params.append(("limit", str(count)))
         return self
 
-    def offset(self, count):
+    def offset(self, count: int) -> Query:
         """Skip the first count rows."""
         self.params.append(("offset", str(count)))
         return self
 
-    def single(self):
+    def single(self) -> Query:
         """Return one object instead of a list; PostgREST errors unless exactly one row matches."""
         self.single_row = True
         return self
 
-    def url(self):
+    def url(self) -> str:
         """The request URL with the select and every filter encoded."""
         params = list(self.params)
         if self.columns is not None:
@@ -297,9 +325,9 @@ class Query:
         url = self.client.url + "/rest/v1/" + quote(self.table)
         return url + ("?" + query if query else "")
 
-    async def execute(self):
+    async def execute(self) -> Result:
         """Send the query and return a Result, raising SupabaseError on failure."""
-        extra = {}
+        extra: dict[str, str] = {}
         if self.body is not None:
             extra["content-type"] = "application/json"
         if self.prefer:
@@ -321,14 +349,20 @@ class Query:
 class Functions:
     """Call other Edge Functions in the same project."""
 
-    def __init__(self, client):
+    def __init__(self, client: Supabase) -> None:
         """Keep the client whose URL and token to use."""
         self.client = client
 
-    async def invoke(self, name, body=None, headers=None, method="POST"):
+    async def invoke(
+        self,
+        name: str,
+        body: Any = None,
+        headers: dict[str, str] | None = None,
+        method: str = "POST",
+    ) -> Any:
         """Call a function with a JSON body and return its parsed response."""
         extra = dict(headers or {})
-        payload = None
+        payload: str | None = None
         if body is not None:
             payload = body if isinstance(body, str) else json.dumps(body)
             extra.setdefault("content-type", "application/json")
@@ -346,11 +380,11 @@ class Functions:
 class Storage:
     """Supabase Storage: buckets of files."""
 
-    def __init__(self, client):
+    def __init__(self, client: Supabase) -> None:
         """Keep the client whose URL and token to use."""
         self.client = client
 
-    def from_(self, bucket):
+    def from_(self, bucket: str) -> Bucket:
         """Work with the files in one bucket."""
         return Bucket(self.client, bucket)
 
@@ -358,12 +392,12 @@ class Storage:
 class Bucket:
     """Download, upload and remove files in a bucket."""
 
-    def __init__(self, client, bucket):
+    def __init__(self, client: Supabase, bucket: str) -> None:
         """Keep the client and the bucket name."""
         self.client = client
         self.bucket = bucket
 
-    def _url(self, path):
+    def _url(self, path: str) -> str:
         """The object URL for a path in this bucket."""
         return (
             self.client.url
@@ -373,7 +407,7 @@ class Bucket:
             + quote(path.lstrip("/"), safe="/")
         )
 
-    async def download(self, path):
+    async def download(self, path: str) -> bytes:
         """Return a file's contents as bytes."""
         import binascii
 
@@ -385,8 +419,12 @@ class Bucket:
         return binascii.a2b_base64(response["body"].encode())  # MicroPython wants bytes
 
     async def upload(
-        self, path, data, content_type="application/octet-stream", upsert=False
-    ):
+        self,
+        path: str,
+        data: bytes | bytearray | str,
+        content_type: str = "application/octet-stream",
+        upsert: bool = False,
+    ) -> Any:
         """Upload bytes or text to a path; upsert replaces an existing file."""
         import binascii
 
@@ -404,7 +442,7 @@ class Bucket:
             raise _error(response)
         return _decode(response)
 
-    async def remove(self, paths):
+    async def remove(self, paths: list[str]) -> Any:
         """Delete files by path."""
         response = await fetch(
             "DELETE",

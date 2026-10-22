@@ -23,7 +23,7 @@ DOCKER_HUB = {
 }
 
 
-def pull(image):
+def pull(image: str) -> bool:
     """Pull an image, retrying once; return whether it worked."""
     for attempt in range(2):
         if subprocess.run(["docker", "pull", "-q", image]).returncode == 0:
@@ -32,7 +32,7 @@ def pull(image):
     return False
 
 
-def main():
+def main() -> None:
     """Pull every test image, from ECR or else from Docker Hub."""
     for image in IMAGES.values():
         if pull(image):

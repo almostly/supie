@@ -19,34 +19,42 @@ tests, models run with the onnxruntime package.
 Like supie.app, this module runs under CPython, MicroPython and Pyodide.
 """
 
+from __future__ import annotations
+
 import json
+from typing import TYPE_CHECKING, Any
 
 from supie.app import env, get_host
+
+if TYPE_CHECKING:
+    from supie.supabase import Supabase
 
 
 class Model:
     """A loaded ONNX model: its input and output names, and run()."""
 
-    def __init__(self, handle, inputs, outputs):
+    def __init__(self, handle: int, inputs: list[str], outputs: list[str]) -> None:
         """Wrap the host's handle for a loaded model."""
         self.handle = handle
         self.inputs = inputs
         self.outputs = outputs
 
     @classmethod
-    def _from_info(cls, raw):
+    def _from_info(cls, raw: str) -> Model:
         """Build a Model from the host's JSON description of a session."""
         info = json.loads(raw)
         return cls(info["handle"], info["inputs"], info["outputs"])
 
     @classmethod
-    async def from_url(cls, url, headers=None):
+    async def from_url(cls, url: str, headers: dict[str, str] | None = None) -> Model:
         """Download a model from a URL and load it."""
         raw = await get_host().onnx_load(url, json.dumps(headers or {}))
         return cls._from_info(raw)
 
     @classmethod
-    async def from_storage(cls, bucket, path, client=None):
+    async def from_storage(
+        cls, bucket: str, path: str, client: Supabase | None = None
+    ) -> Model:
         """Load a model from Supabase Storage, as the service role unless a client is given."""
         if client is None:
             from supie.supabase import Supabase
@@ -56,7 +64,7 @@ class Model:
         bucket_files = client.storage.from_(bucket)
         return await cls.from_url(bucket_files._url(path), client.headers())
 
-    async def run(self, inputs):
+    async def run(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """Run the model and return its outputs as nested lists, by name.
 
         inputs maps each input name to nested lists of float32 values, or to

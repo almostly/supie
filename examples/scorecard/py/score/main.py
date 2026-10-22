@@ -6,6 +6,7 @@ response is sent, as the caller, so row level security applies.
 """
 
 import math
+from typing import Any
 
 from supie import App, HTTPError, Request
 
@@ -21,7 +22,7 @@ OFFSET = 600
 FACTOR = 20 / math.log(2)  # 20 points to double the odds
 
 
-def points(feature, value):
+def points(feature: str, value: float) -> int:
     """The points for one feature's value."""
     for upper, pts in BINS[feature]:
         if value < upper:
@@ -30,13 +31,13 @@ def points(feature, value):
 
 
 @app.get("/health")
-def health(req: Request):
+def health(req: Request) -> dict[str, bool]:
     """Liveness check."""
     return {"ok": True}
 
 
 @app.post("/")
-def score(req: Request):
+def score(req: Request) -> dict[str, float]:
     """Score an applicant and log the decision in the background."""
     applicant = req.json()
     missing = [f for f in BINS if f not in applicant]
@@ -48,7 +49,9 @@ def score(req: Request):
     return {"score": total, "pd": round(pd, 4)}
 
 
-async def log_decision(req, applicant, total, pd):
+async def log_decision(
+    req: Request, applicant: dict[str, Any], total: int, pd: float
+) -> None:
     """Record the decision in score_log."""
     row = {"applicant_id": applicant.get("id"), "score": total, "pd": pd}
     await req.supabase.table("score_log").insert(row).execute()
