@@ -579,19 +579,24 @@ class App:
 
 
 async def dispatch(app: App, raw: str) -> str:
-    """Handle one request from the shim: JSON in, JSON out.
+    """Handle one request from the shim.
+
+    In and out, the framing is JSON metadata, a newline, then the body as is:
+    nesting the body inside the JSON would cost MicroPython about a second per
+    megabyte to escape and unescape. JSON never contains a raw newline.
 
     Unexpected errors become a 500 for the caller, with the traceback in "log" for
     the function's logs. Background tasks are kept under "bg" until the shim runs
     them with run_background.
     """
-    data = json.loads(raw)
+    split = raw.find("\n")
+    data = json.loads(raw[:split] if split >= 0 else raw)
     request = Request(
         data.get("method", "GET"),
         data.get("path", "/"),
         data.get("query"),
         data.get("headers"),
-        data.get("body", ""),
+        raw[split + 1 :] if split >= 0 else data.get("body", ""),
     )
     log: str | None = None
     try:
@@ -600,13 +605,14 @@ async def dispatch(app: App, raw: str) -> str:
         log = format_exception(error)
         response = _error_response(HTTPError(500))
     wire = response.wire()
+    text = wire.pop("body")
     wire["log"] = log
     wire["bg"] = None
     if request._background:
         _next_id[0] += 1
         _pending[_next_id[0]] = request._background
         wire["bg"] = _next_id[0]
-    return json.dumps(wire)
+    return json.dumps(wire) + "\n" + text
 
 
 async def run_background(task_id: int) -> str:

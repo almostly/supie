@@ -328,6 +328,15 @@ Tests run under CPython. A handler that passes them can still use something Micr
 | Standard library | partial: json, math, re, datetime, random, hashlib, base64, collections, itertools, functools, asyncio and more, but no statistics or dataclasses | complete |
 | Speed of Python loops | about half of Pyodide | |
 
+Payload sizes, on the Edge Runtime with the hosted limits (2 s of CPU, 256 MB), for JSON rows:
+
+| | parse a JSON body | return a JSON body |
+|---|---|---|
+| MicroPython (16 MB heap) | up to 10 MB in 0.5 s | 1 MB in 1.1 s; 5 MB runs out of CPU |
+| Pyodide | up to 20 MB in 0.5 s | up to 10 MB in 0.5 s |
+
+MicroPython parses JSON quickly but encodes it at about a second per megabyte, so return large payloads from Pyodide. Raise MicroPython's heap with `heap_mb` for request bodies over about 10 MB.
+
 MicroPython has no `typing` module, so supie ships a stand-in where every hint does nothing. Annotated code and `from __future__ import annotations` work on both runtimes.
 
 Pick Pyodide per function in `supie.toml`:

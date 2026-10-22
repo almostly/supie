@@ -175,16 +175,23 @@ const waitUntil = (promise: Promise<unknown>) => {
 
 Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
-  const raw = JSON.stringify({
+  // Small JSON metadata, a newline, then the body as is. Nesting the body in the
+  // JSON would make Python unescape and escape it again, which on MicroPython
+  // costs about a second per megabyte. JSON never contains a raw newline.
+  const meta = JSON.stringify({
     method: req.method,
     path: routePath(url.pathname),
     query: Object.fromEntries(url.searchParams),
     headers: Object.fromEntries(req.headers),
-    body: req.body ? await req.text() : "",
   });
+  const raw = meta + "\n" + (req.body ? await req.text() : "");
   let wire;
+  let text: string;
   try {
-    wire = JSON.parse(await dispatch(raw));
+    const out: string = await dispatch(raw);
+    const split = out.indexOf("\n");
+    wire = JSON.parse(out.slice(0, split));
+    text = out.slice(split + 1);
   } catch (err) {
     console.error(`supie: ${NAME} failed outside the handler:`, err);
     return Response.json({ error: "Internal Server Error" }, { status: 500 });
@@ -198,6 +205,6 @@ Deno.serve(async (req: Request) => {
     );
   }
   const noBody = wire.status === 204 || wire.status === 304 || req.method === "HEAD";
-  const body = noBody ? null : wire.base64 ? decodeBase64(wire.body) : wire.body;
+  const body = noBody ? null : wire.base64 ? decodeBase64(text) : text;
   return new Response(body, { status: wire.status, headers: wire.headers });
 });

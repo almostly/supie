@@ -249,15 +249,8 @@ class TestClient:
         if json is not None:
             body = jsonlib.dumps(json)
             sent.setdefault("content-type", "application/json")
-        raw = jsonlib.dumps(
-            {
-                "method": method,
-                "path": path,
-                "query": params,
-                "headers": sent,
-                "body": body or "",
-            }
-        )
+        meta = {"method": method, "path": path, "query": params, "headers": sent}
+        raw = jsonlib.dumps(meta) + "\n" + (body or "")  # framed as the shim does
         return asyncio.run(self._send(raw))
 
     async def _send(self, raw: str) -> TestResponse:
@@ -265,7 +258,10 @@ class TestClient:
         runtime.set_host(self.host)
         self.host.sleep_scale = self.sleep_scale
         try:
-            wire = jsonlib.loads(await runtime.dispatch(self.app, raw))
+            out = await runtime.dispatch(self.app, raw)
+            meta, _, text = out.partition("\n")
+            wire = jsonlib.loads(meta)
+            wire["body"] = text
             if wire["log"] and self.raise_errors:
                 raise AssertionError("handler failed:\n" + wire["log"])
             if wire["bg"] is not None:
