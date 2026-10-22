@@ -35,7 +35,8 @@ dev = [
     "pytest>=8",
     "openpyxl>=3.1",  # writes the workbook the edge package test uploads
     "onnx>=1.17",  # builds the tiny model the ONNX tests serve
-    "onnxruntime>=1.20",  # runs ONNX models in tests, standing in for the Edge Runtime
+    # runs ONNX models in tests, standing in for the Edge Runtime; no wheels for 3.10
+    "onnxruntime>=1.20; python_version >= '3.11'",
     "commitizen>=4",
 ]
 
