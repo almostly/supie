@@ -1,0 +1,108 @@
+[project]
+name = "supie"
+version = "0.1.0"
+description = "Python edge functions for Supabase."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "almostly" }]
+keywords = ["supabase", "edge-functions", "serverless", "micropython", "pyodide", "deno"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+    "typer>=0.12",
+    "tomlkit>=0.13",  # editing supabase/config.toml without losing comments
+]
+
+[project.scripts]
+supie = "supie.cli:app"
+
+[project.urls]
+Repository = "https://github.com/almostly/supie"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "commitizen>=4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/supie"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+extend-exclude = ["prototype"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: downloads a runtime from npm (cached after the first run)",
+    "edge: runs functions on Supabase's Edge Runtime image (Docker)",
+]
+
+[tool.commitizen]
+# Message format: `Area(<+|~|->): description`, where the symbol is what the change
+# does to that area: + added, ~ changed, - removed. Example:
+#   Build(+): Pyodide snapshots
+name = "cz_customize"
+version_provider = "pep621"
+version_scheme = "semver"
+tag_format = "v$version"
+major_version_zero = true
+update_changelog_on_bump = true
+changelog_incremental = true
+
+[tool.commitizen.customize]
+message_template = "{{area}}({{change}}): {{description}}"
+example = "Build(+): Pyodide snapshots"
+schema = "<Area>(<+|~|->): <description>"
+schema_pattern = "^[\\w .+/-]+\\([+~-]\\): .+"
+bump_pattern = "^[\\w .+/-]+\\(([+~-])\\):"
+commit_parser = "^(?P<scope>[\\w .+/-]+)\\((?P<change_type>[+~-])\\): (?P<message>.+)"
+changelog_pattern = "^[\\w .+/-]+\\([+~-]\\):"
+change_type_order = ["Added", "Changed", "Removed"]
+
+[tool.commitizen.customize.change_type_map]
+"+" = "Added"
+"~" = "Changed"
+"-" = "Removed"
+
+[tool.commitizen.customize.bump_map]
+"+" = "MINOR"
+"-" = "MINOR"
+"~" = "PATCH"
+
+[[tool.commitizen.customize.questions]]
+type = "input"
+name = "area"
+message = "Area (e.g. Runtime, Build, CLI, Supabase, Docs):"
+
+[[tool.commitizen.customize.questions]]
+type = "list"
+name = "change"
+message = "What does this do to it?"
+choices = [
+    { value = "+", name = "+ : added" },
+    { value = "~", name = "~ : changed" },
+    { value = "-", name = "- : removed" },
+]
+
+[[tool.commitizen.customize.questions]]
+type = "input"
+name = "description"
+message = "Short description of the change:"
