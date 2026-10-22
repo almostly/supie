@@ -92,4 +92,16 @@ Earlier numbers from plain Deno 2.9.6 in a 2-vCPU Linux sandbox, where thread CP
 | plain | 2.0 to 2.2 s | 2.2 to 2.6 s | 0.4 ms | 36 MB |
 | snapshot (.gz) | 0.30 to 0.39 s | 0.32 to 0.38 s | 0.5 ms | 68 MB |
 
-Hosted hardware is unknown, so treat the snapshot as required for production.
+### Hosted Supabase
+
+Deployed to a hosted project in eu-west-1 on 2026-10-22 with `supabase functions deploy`. The CLI reported a 12 MB bundle, with the snapshot included.
+
+| | requests | cold boots | cold boot, wall | failures | memory |
+|---|---|---|---|---|---|
+| snapshot (.gz) | 30 | 28 | 0.25 to 0.41 s, median 0.30 s | 0 | 103 MB |
+| plain | 12 | 12 | 1.83 to 1.94 s | 5 | 67 MB |
+
+- **Workers were rarely reused.** 28 of 30 sequential requests booted a fresh worker, so on hosted the cold boot is the normal path, not the exception.
+- **Plain boots don't fit.** They sit right at the 2 s CPU budget, and the failures returned `WORKER_RESOURCE_LIMIT` (HTTP 546). The snapshot is required.
+- **Hosted CPU is slower.** A 1M-iteration Python loop took 0.61 s, about 3 times longer than the Mac above. A 30M-iteration loop failed with `WORKER_RESOURCE_LIMIT`.
+- **Round trips.** From a client in Europe, a cold request took about 0.7 s end to end and a warm one about 0.35 s.

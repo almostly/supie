@@ -1,3 +1,6 @@
 # fetched by fetch_pyodide.sh
 supabase/functions/py-hello/pyodide/
 supabase/functions/py-hello/snapshot.bin.gz
+
+# Supabase CLI state
+supabase/.temp/
