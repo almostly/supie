@@ -49,11 +49,13 @@ In a Supabase project (run `supabase init` first if you don't have one):
 supie init hello      # py/hello/main.py and py/hello/test_main.py
 pytest py/hello       # handlers are plain Python
 supie build           # writes supabase/functions/hello/
-supie serve           # supabase functions serve, after building
+supie serve           # supabase functions serve, rebuilding when py/ changes
 supie deploy          # supabase functions deploy, after building
 ```
 
 Your Python lives in `py/<name>/`. `supie build` turns it into `supabase/functions/<name>/` and adds the function to `supabase/config.toml`. Treat the generated folder like a `dist/` directory: edit `py/`, never the output. supie refuses to overwrite a function it didn't generate.
+
+`supie serve` watches `py/`: a change rebuilds that function and the Supabase CLI reloads it, in milliseconds for MicroPython. Pass `--no-watch` to build once. Options after `--` go to `supabase functions serve`.
 
 Everything in `py/<name>/` ships with the function, including helper modules, packages and data files. Tests, caches and hidden files are left out.
 
@@ -340,7 +342,6 @@ Two workarounds are built in: Supabase's runtime refuses shared WebAssembly memo
 - **Bundle size caps Pyodide stacks.** Pyodide plus pydantic, preloaded, is about 18 MB of the 20 MB limit.
 - **No direct Postgres connection.** Use the Supabase client, or an RPC for raw SQL.
 - **Text request bodies only.** Binary request bodies are not supported yet. Responses and Storage handle bytes.
-- **No watch mode.** `supie serve` doesn't rebuild on file changes yet.
 - **Flows run inside one worker.** A worker that stops mid-run leaves the run for `resume-stale`. A pgflow-backed mode, where Postgres schedules each step, is planned.
 
 ## Development

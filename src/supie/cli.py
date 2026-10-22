@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -144,10 +145,50 @@ def _supabase(args: list[str], root: Path) -> None:
 @app.command(
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )
-def serve(ctx: typer.Context, root: Path = Root) -> None:
-    """Build every function, then run `supabase functions serve` (extra options pass through)."""
+def serve(
+    ctx: typer.Context,
+    root: Path = Root,
+    watch: bool = typer.Option(
+        True, "--watch/--no-watch", help="Rebuild a function when its Python changes."
+    ),
+) -> None:
+    """Build every function, then run `supabase functions serve` (extra options pass through).
+
+    With --watch (the default), a change under py/<name>/ rebuilds that function,
+    and the Supabase CLI reloads it.
+    """
     project = _build(root, None)
-    _supabase(["functions", "serve", *ctx.args], project.root)
+    if not shutil.which("supabase"):
+        _fail("the Supabase CLI isn't installed: https://supabase.com/docs/guides/cli")
+    child = subprocess.Popen(
+        ["supabase", "functions", "serve", *ctx.args], cwd=project.root
+    )
+    seen = {name: build.fingerprint(f) for name, f in project.functions.items()}
+    try:
+        while child.poll() is None:
+            time.sleep(0.5)
+            if watch:
+                _rebuild_changed(project, seen)
+    except KeyboardInterrupt:
+        child.terminate()
+    raise typer.Exit(child.wait())
+
+
+def _rebuild_changed(project: build.Project, seen: dict[str, tuple]) -> None:
+    """Rebuild functions whose source changed since the last look, reporting errors."""
+    for name, function in project.functions.items():
+        current = build.fingerprint(function)
+        if current == seen.get(name):
+            continue
+        seen[name] = current
+        started = time.perf_counter()
+        try:
+            report = build.build(project, function)
+        except (build.BuildError, runtimes.FetchError) as error:
+            typer.secho(f"rebuild of {name} failed: {error}", fg="red", err=True)
+            continue
+        elapsed = time.perf_counter() - started
+        typer.echo(f"rebuilt {name} in {elapsed:.1f} s ({_mb(report.size)} compressed)")
 
 
 @app.command()
@@ -270,3 +311,7 @@ def model_publish(
             _fail(str(error))
     typer.echo(f"uploaded {source} to {target}")
     typer.echo(f'load it with: await Model.from_storage("{bucket}", "{path}")')
+
+
+if __name__ == "__main__":
+    app()

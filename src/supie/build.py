@@ -455,6 +455,25 @@ def _ship_packages(zipped: Path, snapshot_dir: Path, target: Path) -> None:
                 dst.writestr(item, src.read(item.filename))
 
 
+def fingerprint(function: Function) -> tuple:
+    """What a rebuild depends on in the source folder: every shipped file's mtime and size.
+
+    Tests are left out, so editing them doesn't rebuild.
+    """
+    entries = []
+    for path in sorted(function.source.rglob("*")):
+        rel = path.relative_to(function.source)
+        if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts):
+            continue
+        if not path.is_file() or path.suffix == ".pyc":
+            continue
+        if path.name.startswith("test_") or path.name.endswith("_test.py"):
+            continue
+        stat = path.stat()
+        entries.append((rel.as_posix(), stat.st_mtime_ns, stat.st_size))
+    return tuple(entries)
+
+
 def compressed_size(folder: Path) -> int:
     """Roughly what Supabase counts against the bundle limit: each file gzipped."""
     total = 0

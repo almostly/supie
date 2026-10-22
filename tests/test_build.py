@@ -156,3 +156,71 @@ def test_pyodide_patch_checks_the_code():
     old, new = build.PYODIDE_PATCHES[0]
     second_old, _ = build.PYODIDE_PATCHES[1]
     assert new in build.patch_pyodide(old + second_old)
+
+
+@pytest.mark.network
+def test_watch_rebuilds_changed_functions(project):
+    """serve's watcher rebuilds a function when its source changes, not when its tests do."""
+    import os
+
+    from supie.cli import _rebuild_changed
+
+    cli("init", "hello", "--root", project)
+    cli("build", "--root", project)
+    loaded = build.load_project(project)
+    seen = {n: build.fingerprint(f) for n, f in loaded.functions.items()}
+    app_ts = project / "supabase" / "functions" / "hello" / "app.ts"
+
+    test_file = project / "py" / "hello" / "test_main.py"
+    test_file.write_text(test_file.read_text() + "\n# a comment\n")
+    _rebuild_changed(loaded, seen)
+    assert "UPDATED" not in app_ts.read_text()
+
+    main = project / "py" / "hello" / "main.py"
+    main.write_text(main.read_text().replace('"world"', '"UPDATED"'))
+    stat = main.stat()
+    os.utime(main, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    _rebuild_changed(loaded, seen)
+    assert "UPDATED" in app_ts.read_text()
+
+
+@pytest.mark.network
+def test_serve_watches_while_the_cli_runs(project, tmp_path):
+    """serve runs `supabase functions serve` and rebuilds on changes until it exits."""
+    import os
+    import subprocess
+    import sys
+    import time
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "supabase"
+    fake.write_text('#!/bin/sh\necho fake supabase "$@"\nsleep 3\nexit 7\n')
+    fake.chmod(0o755)
+    cli("init", "hello", "--root", project)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "supie.cli",
+            "serve",
+            "--root",
+            str(project),
+            "--",
+            "--debug",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+    time.sleep(1.5)
+    main = project / "py" / "hello" / "main.py"
+    main.write_text(main.read_text().replace('"world"', '"watched"'))
+    output, _ = child.communicate(timeout=60)
+    assert child.returncode == 7, output
+    assert "fake supabase functions serve --debug" in output
+    assert "rebuilt hello" in output
+    app_ts = project / "supabase" / "functions" / "hello" / "app.ts"
+    assert "watched" in app_ts.read_text()
