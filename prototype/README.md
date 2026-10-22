@@ -125,3 +125,19 @@ Deployed to a hosted project in eu-west-1 on 2026-10-22 with `supabase functions
 - **Plain boots don't fit.** They sit right at the 2 s CPU budget, and the failures returned `WORKER_RESOURCE_LIMIT` (HTTP 546). The snapshot is required.
 - **Hosted CPU is slower.** A 1M-iteration Python loop took 0.61 s, about 3 times longer than the Mac above. A 30M-iteration loop failed with `WORKER_RESOURCE_LIMIT`.
 - **Round trips.** From a client in Europe, a cold request took about 0.7 s end to end and a warm one about 0.35 s.
+
+MicroPython on the same project, deployed the same way. The CLI reported a 221 kB bundle.
+
+| | requests | cold boots | cold boot, wall | cold request, end to end | memory |
+|---|---|---|---|---|---|
+| Pyodide, snapshot | 30 | 28 | 0.25 to 0.41 s, median 0.30 s | median 0.74 s | 103 MB |
+| MicroPython | 30 | 30 | 14 to 39 ms, median 19 ms | median 0.18 s | 31 MB |
+
+| Python loop on hosted | Pyodide | MicroPython |
+|---|---|---|
+| 100k iterations | | 0.19 s |
+| 1M iterations | 0.61 s | 1.24 s |
+| 3M iterations | | `WORKER_RESOURCE_LIMIT` |
+
+- **MicroPython is the fast path.** Every request got a fresh worker, and the whole cold request still finished in about 0.18 s.
+- **Compute is the limit.** MicroPython runs Python loops about 2 times slower than Pyodide on hosted, so around 1.5M simple iterations is the practical ceiling per request.
