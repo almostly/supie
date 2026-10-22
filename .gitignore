@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.DS_Store
+.tmp/
+.env
+
+# local secrets (connection strings, API keys): never committed or packaged
+.env
+.env.*
