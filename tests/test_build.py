@@ -224,3 +224,12 @@ def test_serve_watches_while_the_cli_runs(project, tmp_path):
     assert "rebuilt hello" in output
     app_ts = project / "supabase" / "functions" / "hello" / "app.ts"
     assert "watched" in app_ts.read_text()
+
+
+def test_queue_migration(project):
+    """queue migration writes pgmq and the queue functions once."""
+    result = cli("queue", "migration", "--root", project)
+    assert result.exit_code == 0, result.output
+    (path,) = (project / "supabase" / "migrations").glob("*_supie_queue.sql")
+    assert "create extension if not exists pgmq" in path.read_text()
+    assert cli("queue", "migration", "--root", project).exit_code == 1

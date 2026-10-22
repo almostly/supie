@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -186,3 +187,50 @@ def proxy(base):
             return FakeResponse(error.read().decode(), error.code, dict(error.headers))
 
     return fetch
+
+
+EDGE = Path(__file__).parent / "edge"
+
+
+@contextlib.contextmanager
+def edge_runtime(stack, images, functions, ready_path):
+    """Serve a functions folder from the Edge Runtime, next to the stack's PostgREST.
+
+    The gateway function stands in for Supabase's API gateway, so SUPABASE_URL
+    points at it; it's copied into the folder. Yields (base, container).
+    """
+    if not (functions / "gateway").exists():
+        shutil.copytree(EDGE / "gateway", functions / "gateway")
+    port = _free_port()
+    container = f"supie-edge-{uuid.uuid4().hex[:8]}"
+    docker(
+        "run", "-d", "--name", container, "--network", stack.network,
+        "-p", f"127.0.0.1:{port}:9000",
+        "-e", "SUPABASE_URL=http://localhost:9000/gateway",
+        "-e", f"SUPABASE_SERVICE_ROLE_KEY={SERVICE}",
+        "-e", f"SUPABASE_ANON_KEY={ANON}",
+        "-e", f"PGRST_URL=http://{stack.api}:3000",
+        "-v", f"{functions}:/home/deno/functions:ro",
+        "-v", f"{EDGE / 'pgflow-main'}:/home/deno/main:ro",
+        images["edge"], "start", "--main-service", "/home/deno/main",
+    )  # fmt: skip
+    base = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(150):
+            try:
+                urllib.request.urlopen(base + ready_path, timeout=5)
+                break
+            except urllib.error.HTTPError:
+                break
+            except OSError:
+                time.sleep(0.3)
+        yield base, container
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+
+
+def logs(container):
+    """A container's log, minus noise, for failure messages."""
+    out = subprocess.run(["docker", "logs", container], capture_output=True, text=True)
+    lines = (out.stdout + out.stderr).splitlines()
+    return "\n".join(line for line in lines if "cpuUsage" not in line)[-6000:]

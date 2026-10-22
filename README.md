@@ -298,6 +298,46 @@ Overhead: each level of steps costs three database calls (read, claim, complete)
 
 Tested against pgflow 0.17.2 locally and on hosted Supabase, with workers on MicroPython and Pyodide: parallel steps, a failed attempt retried by pgflow, a skipped route and the endpoints. Each hosted run took 4 to 7 s end to end.
 
+## Queues
+
+For work that must not be lost when a request fails, accept it fast and handle it from a queue. A failed attempt comes back after a backoff, and a message that keeps failing is kept, with its error, instead of disappearing:
+
+```python
+from supie import App, Request, Response
+from supie.queue import Queue
+
+app = App()
+queue = Queue("scoring")
+
+
+@app.post("/score")
+async def score(req: Request) -> Response:
+    await queue.send(req.json())                 # durable once this returns
+    req.background(queue.work(req))              # optional: start right away
+    return Response({"queued": True}, status=202)
+
+
+@queue.consumer(batch=10, max_attempts=5)
+async def handle(ctx, message):
+    ...
+
+
+queue.mount(app, "/queues/scoring")              # work, stats and replay endpoints
+```
+
+```bash
+supie queue migration     # pgmq, the supie_queue_* functions and the dead-letter table
+supabase db push
+```
+
+- **Delivery.** At least once. A message stays hidden for `visibility` seconds while it's handled, so keep that above the slowest handling; if a worker dies mid-message, it comes back after that.
+- **Retries.** A failed attempt (an exception, or `timeout` passed) comes back after `backoff`, then twice that, and so on. `ctx.attempt` says which attempt this is.
+- **Dead letters.** After `max_attempts`, the message moves to `supie_queue_dead` with its last error and attempt count. `POST <prefix>/dead/<id>/replay` sends it back.
+- **Who handles messages.** `queue.work()` handles messages until the queue is idle: call it in the background after sending, and from pg_cron through `POST <prefix>/work` so nothing waits for the next request.
+- **Batches.** The messages in one read are handled concurrently.
+
+Messages live in pgmq, the engine behind Supabase Queues. Like the pgflow bridge, supie reaches it through `public` functions only the service role can call, so you don't need to expose the `pgmq_public` schema. For tests, `Queue("scoring", MemoryQueue())` keeps messages in memory.
+
 ## Testing
 
 Handlers are plain Python, so you test them with pytest and no Supabase at all:

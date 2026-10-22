@@ -26,6 +26,8 @@ flow_app = typer.Typer(help="Workflows: the tables that keep their checkpoints."
 app.add_typer(flow_app, name="flow")
 model_app = typer.Typer(help="ONNX models: get them ready for the Edge Runtime.")
 app.add_typer(model_app, name="model")
+queue_app = typer.Typer(help="Queues: the functions and dead-letter table they use.")
+app.add_typer(queue_app, name="queue")
 
 Root = typer.Option(
     Path("."), "--root", help="The project folder, with supabase/ in it."
@@ -332,3 +334,21 @@ def model_publish(
 
 if __name__ == "__main__":
     app()
+
+
+@queue_app.command("migration")
+def queue_migration(root: Path = Root) -> None:
+    """Write the migration for queues (pgmq and supie's functions) to supabase/migrations/."""
+    project = build.load_project(root)
+    migrations = project.supabase / "migrations"
+    existing = sorted(migrations.glob("*_supie_queue.sql"))
+    if existing:
+        _fail(f"{existing[-1]} already exists")
+    migrations.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    path = migrations / f"{stamp}_supie_queue.sql"
+    path.write_text(
+        resources.files("supie").joinpath("sql").joinpath("queue.sql").read_text()
+    )
+    typer.echo(f"wrote {path.relative_to(project.root)}")
+    typer.echo("next: `supabase db push` (or `supabase migration up` locally)")

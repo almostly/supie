@@ -43,7 +43,7 @@ const before = (Module.supieLoadedDylibs ?? []).length;
 py.runPython(`
 import sys
 sys.path.insert(0, "/app")
-import json, supie, supie.app, supie.supabase, supie.flow, supie.onnx
+import json, supie, supie.app, supie.supabase, supie.flow, supie.onnx, supie.queue
 ${modules ? `import ${modules}` : ""}
 `);
 const dylibs = (Module.supieLoadedDylibs ?? []).slice(before);

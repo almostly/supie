@@ -205,15 +205,11 @@ def edge_pgflow(rest, tmp_path_factory, images):
     """The durable flow built for both runtimes, served next to pgflow's PostgREST."""
     import json
     import shutil
-    import subprocess
-    import uuid
-    from pathlib import Path
 
-    from stack import _free_port, docker
+    from stack import EDGE, edge_runtime
 
     from supie import build
 
-    here = Path(__file__).parent / "edge"
     root = tmp_path_factory.mktemp("pgflow-edge")
     (root / "supabase").mkdir()
     (root / "supabase" / "config.toml").write_text('project_id = "p"\n')
@@ -221,56 +217,31 @@ def edge_pgflow(rest, tmp_path_factory, images):
         ("durable", "edge_mpy"),
         ("durable-pyodide", "edge_pyodide"),
     ]:
-        shutil.copytree(here / "durable", root / "py" / name)
+        shutil.copytree(EDGE / "durable", root / "py" / name)
         main = root / "py" / name / "main.py"
         main.write_text(main.read_text().replace("edge_scoring", flow_name))
     (root / "supie.toml").write_text(
         '[functions.durable-pyodide]\nruntime = "pyodide"\n'
     )
-    shutil.copytree(here / "gateway", root / "supabase" / "functions" / "gateway")
     project = build.load_project(root)
     for name in ("durable", "durable-pyodide"):
         build.build(project, project.functions[name])
-
-    port = _free_port()
-    container = f"supie-pgflow-edge-{uuid.uuid4().hex[:8]}"
-    docker(
-        "run", "-d", "--name", container, "--network", rest.network,
-        "-p", f"127.0.0.1:{port}:9000",
-        "-e", "SUPABASE_URL=http://localhost:9000/gateway",
-        "-e", f"SUPABASE_SERVICE_ROLE_KEY={SERVICE}",
-        "-e", f"SUPABASE_ANON_KEY={ANON}",
-        "-e", f"PGRST_URL=http://{rest.api}:3000",
-        "-v", f"{root / 'supabase' / 'functions'}:/home/deno/functions:ro",
-        "-v", f"{here / 'pgflow-main'}:/home/deno/main:ro",
-        images["edge"], "start", "--main-service", "/home/deno/main",
-    )  # fmt: skip
-    edge_base = f"http://127.0.0.1:{port}"
-    for _ in range(150):
-        try:
-            urllib.request.urlopen(f"{edge_base}/durable/shape", timeout=5)
-            break
-        except OSError:
-            time.sleep(0.3)
-    yield edge_base, json, container
-    subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+    functions = root / "supabase" / "functions"
+    with edge_runtime(rest, images, functions, "/durable/shape") as (base, container):
+        yield base, json, container
 
 
 @pytest.mark.edge
 @pytest.mark.parametrize("fn", ["durable", "durable-pyodide"])
 def test_durable_flow_in_the_edge_runtime(edge_pgflow, fn):
     """Start a run in the function; its worker runs every step, with a retry and a route."""
-    import subprocess
+    from stack import logs as container_logs
 
     edge_base, json, container = edge_pgflow
 
     def logs():
-        """The Edge Runtime's log, minus noise."""
-        out = subprocess.run(
-            ["docker", "logs", container], capture_output=True, text=True
-        )
-        lines = (out.stdout + out.stderr).splitlines()
-        return "\n".join(line for line in lines if "cpuUsage" not in line)[-6000:]
+        """The Edge Runtime's log."""
+        return container_logs(container)
 
     request = urllib.request.Request(
         f"{edge_base}/{fn}/flows",
