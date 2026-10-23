@@ -50,7 +50,7 @@ A one-hour soak on hosted Supabase (eu-west-1, MicroPython, 2026-10-22), from a 
 
 - **No server errors.** All 12 failures were connection-level (a reset or an early end of the TLS stream), none an HTTP 5xx from the function.
 - **Nothing lost, nothing doubled.** Every one of 3,916 applications was accepted after at most three client retries, and each ended exactly once: 3,837 decided once, 79 in the dead letters as designed. The 334 duplicate sends and 10 retries added no messages.
-- **The tail is slow.** One request in ten took over 2 s, and a few over 10 s, in steady traffic rather than in bursts. Clients should use timeouts and retries, which the queue's send keys make safe.
+- **The tail is the network, not the function.** One request in ten took over 2 s, and a few over 10 s, in steady traffic rather than in bursts. The client opened a new connection per request, and an inline score and a queued send made in the same second were slow together far more often than chance, though separate workers handled them. A later probe from the same client of Supabase Auth's health endpoint, with no edge function involved, showed the same tail, all of it in the TCP handshake: p90 1.45 s to connect, against about 0.1 s for the server to answer. Reuse connections where you can, and use timeouts and retries, which the queue's send keys make safe.
 
 ## Install
 
