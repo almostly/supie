@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/almostly/supie/main/docs/images/supie_icon.png" width="128" alt="supie">
+</p>
+
 # supie
 
 Python edge functions for Supabase.
