@@ -8,7 +8,7 @@ import pytest
 
 from supie import App, Response, sleep
 from supie.queue import MemoryQueue, Queue
-from supie.testing import TestClient, run
+from supie.testing import FakeResponse, TestClient, run
 
 
 def token(claims):
@@ -190,6 +190,31 @@ def test_send_from_handler_and_mounted_endpoints():
     forged = token({"role": "service_role"})
     assert client.post("/queues/scoring/work", headers=forged).status == 403
     assert client.get("/queues/scoring/stats", headers=forged).status == 403
+
+
+def test_service_tokens_are_checked_with_supabase_auth():
+    """Another service role token passes when Supabase Auth accepts it, and is
+    remembered; one Auth rejects is refused.
+    """
+    app = App()
+    Queue("auth_checked", MemoryQueue()).mount(app, "/q")
+    genuine = token({"role": "service_role", "iat": 1})
+    forged = token({"role": "service_role", "iat": 2})
+    auth_calls = []
+
+    def auth(call):
+        """Supabase Auth: accepts only the genuine token."""
+        auth_calls.append(call.headers["apikey"])
+        ok = call.headers["apikey"] == genuine["Authorization"][7:]
+        return FakeResponse(
+            {"users": []} if ok else {"msg": "invalid JWT"}, 200 if ok else 401
+        )
+
+    client = TestClient(app, fetch=auth)
+    assert client.get("/q/stats", headers=genuine).status == 200
+    assert client.get("/q/stats", headers=genuine).status == 200
+    assert client.get("/q/stats", headers=forged).status == 403
+    assert len(auth_calls) == 2, "the genuine token is checked once"
 
 
 def test_work_seconds_are_capped_and_checked():

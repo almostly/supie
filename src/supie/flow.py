@@ -686,7 +686,7 @@ class Flow:
         @app.post(prefix + "/resume-stale")
         async def resume_stale(req: Request) -> dict[str, Any]:
             """Resume runs whose worker stopped (service role only)."""
-            if not req.is_service:
+            if not await req.check_service():
                 raise HTTPError(403, "needs the service role")
             idle = int(req.query.get("idle", "300"))
             ids = await flow._store().stale(flow.name, idle)
@@ -743,7 +743,7 @@ class Flow:
         @app.post(prefix + "/work")
         async def work_durable(req: Request) -> dict[str, int]:
             """Run waiting tasks (service role only)."""
-            if not req.is_service:
+            if not await req.check_service():
                 raise HTTPError(403, "needs the service role")
             seconds = int(req.query.get("seconds", "60"))
             return {"ran": await flow.work(req, seconds=seconds)}
@@ -753,7 +753,7 @@ class Flow:
             """Read a run and its steps."""
             state = await flow.status(run_id)
             owner = state and state.get("owner")
-            hidden = owner and not req.is_service
+            hidden = owner and not await req.check_service()
             if state is None or (hidden and _subject(req) != owner):
                 raise HTTPError(404, "no such run")
             state.pop("owner")
@@ -809,7 +809,7 @@ async def _visible(flow: Flow, req: Request, run_id: str) -> dict[str, Any]:
     if saved is None or saved["flow"] != flow.name:
         raise HTTPError(404, "no such run")
     owner = saved.get("owner")
-    if owner and not req.is_service and _subject(req) != owner:
+    if owner and _subject(req) != owner and not await req.check_service():
         raise HTTPError(404, "no such run")
     return saved
 

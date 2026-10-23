@@ -363,15 +363,15 @@ class Queue:
         """
         queue = self
 
-        def service_only(req: Request) -> None:
+        async def service_only(req: Request) -> None:
             """Refuse anyone but the service role."""
-            if not req.is_service:
+            if not await req.check_service():
                 raise HTTPError(403, "needs the service role")
 
         @app.post(prefix + "/work")
         async def work(req: Request) -> dict[str, int]:
             """Handle waiting messages."""
-            service_only(req)
+            await service_only(req)
             try:
                 seconds = float(req.query.get("seconds", "60"))
             except ValueError:
@@ -381,13 +381,13 @@ class Queue:
         @app.get(prefix + "/stats")
         async def stats(req: Request) -> dict[str, Any]:
             """Queue length and dead letters."""
-            service_only(req)
+            await service_only(req)
             return await queue.stats()
 
         @app.post(prefix + "/dead/{dead_id:int}/replay")
         async def replay(req: Request, dead_id: int) -> dict[str, Any]:
             """Send a dead letter back to the queue."""
-            service_only(req)
+            await service_only(req)
             msg_id = await queue.replay(dead_id)
             if msg_id is None:
                 raise HTTPError(404, "no such dead letter")

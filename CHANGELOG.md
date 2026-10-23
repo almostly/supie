@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.1 (unreleased)
+
+### Fixed
+
+- Service-only endpoints accept the service role key on hosted Supabase again. 0.1.0 compared the caller's token with the function's `SUPABASE_SERVICE_ROLE_KEY` string, and on hosted Supabase a valid service role key can be another string, so the queue's work, stats and replay endpoints and the flows' resume and work endpoints answered 403. `await req.check_service()` passes the function's own key at once and checks any other token claiming the service role with Supabase Auth, which verifies its signature, so forged tokens stay refused. Verified on hosted Supabase with `verify_jwt` off.
+
 ## v0.1.0 (2026-10-23)
 
 ### Added
@@ -8,7 +14,7 @@
 - An async Supabase client for handlers: table queries, RPC, Edge Function calls and Storage, acting as the caller (`req.supabase`) or with the service role (`req.supabase_admin`).
 - Two runtimes: MicroPython (default, about 20 ms cold boot) and Pyodide (CPython 3.14, booting from a memory snapshot).
 - `supie init`, `build`, `serve` and `deploy`.
-- `req.is_service`, true only when the caller sent the project's service role key, compared in constant time. supie's service-only endpoints use it, so they hold even with `verify_jwt` off, when `req.user`'s claims aren't verified.
+- `req.is_service`, true only when the caller sent exactly the function's service role key, compared in constant time.
 - `supie.testing.TestClient` for testing handlers under CPython with a fake environment and fetch.
 - Edge Runtime fixes built into the generated shim: shared WebAssembly memory and `setImmediate` for Pyodide, the Node file path and `Buffer` for MicroPython.
 - `typing` and `__future__` stand-ins for MicroPython.

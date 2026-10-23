@@ -109,7 +109,7 @@ def score(req: Request):
 
 - **Routes.** Use `app.get`, `post`, `put`, `patch` and `delete`, or `app.route(path, methods)`. Path parameters take a type: `{id:int}`, `{x:float}`, `{name}` for a string, and `{rest:path}` for the rest of the path. Paths are relative to the function, so `/` is `/functions/v1/<name>`.
 - **Handlers.** They can be plain functions or `async def`. They receive the request and the path parameters as keyword arguments.
-- **Requests.** A request has `method`, `path`, `query`, `headers` (lower case), `params`, `text()` and `json()`. `json()` answers 400 for a missing or invalid body. `req.user` holds the caller's JWT claims, and `req.token` the raw token. The claims are decoded, not verified: Supabase's gateway checks the signature only while the function keeps `verify_jwt` on. `req.is_service` is true only when the caller sent the project's service role key itself, and supie's work, replay and resume endpoints check that, so a token that merely claims the service role is refused.
+- **Requests.** A request has `method`, `path`, `query`, `headers` (lower case), `params`, `text()` and `json()`. `json()` answers 400 for a missing or invalid body. `req.user` holds the caller's JWT claims, and `req.token` the raw token. The claims are decoded, not verified: Supabase's gateway checks the signature only while the function keeps `verify_jwt` on. `await req.check_service()` is true only for a real service role key: the function's own key passes at once, and another token that claims the role must be accepted by Supabase Auth, which verifies its signature. supie's work, replay and resume endpoints check it, so a token that merely claims the service role is refused.
 - **Return values.** A dict or list becomes JSON, a str becomes text, `bytes` stay binary, and `None` sends a 204. Return a `Response` to set the status, headers or content type.
 - **Errors.** `HTTPError(status, detail)` sends `{"error": detail}`. Any other exception sends a 500 to the caller and writes the traceback to the function's logs.
 - **Environment.** `env["NAME"]` and `env.get("NAME")` read environment variables and secrets at request time.
@@ -466,7 +466,7 @@ Preloading your own module (`"main"` here) runs its module-level code at build t
 
 The cost is size. pydantic preloaded makes the function about 18 MB of Supabase's 20 MB limit, so heavier stacks such as pandas won't fit.
 
-Other settings: `verify_jwt` (default `true`; turned off, anyone can send any claims in `req.user`, so authorize with `req.is_service` or your own checks) and, for MicroPython, `heap_mb` (default 16). A `[project]` table can move the source folder (`source = "py"`) or the Supabase folder (`supabase = "supabase"`).
+Other settings: `verify_jwt` (default `true`; turned off, anyone can send any claims in `req.user`, so authorize with `await req.check_service()` or your own checks) and, for MicroPython, `heap_mb` (default 16). A `[project]` table can move the source folder (`source = "py"`) or the Supabase folder (`supabase = "supabase"`).
 
 ## How it works
 

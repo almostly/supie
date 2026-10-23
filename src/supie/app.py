@@ -82,6 +82,7 @@ REASONS = {
 _host: Host | None = None  # the shim's JS module in the function, a fake in tests
 _pending: dict[int, list[Awaitable[Any]]] = {}  # background tasks per request
 _next_id = [0]
+_service_tokens: set[str] = set()  # tokens Supabase Auth confirmed as the service role
 
 
 def set_host(host: Host | None) -> None:
@@ -230,11 +231,44 @@ class Request:
 
     @property
     def is_service(self) -> bool:
-        """Whether the caller sent this project's service role key, compared in
-        constant time, so a token that merely claims the role doesn't pass.
+        """Whether the caller sent exactly the function's service role key,
+        compared in constant time. A valid service role key can be another
+        string (hosted Supabase can hold another one), so authorize with
+        check_service.
         """
         token, key = self.token, env.get("SUPABASE_SERVICE_ROLE_KEY")
         return bool(token and key) and compare_digest(token, key or "")
+
+    async def check_service(self) -> bool:
+        """Whether the caller holds a service role key for this project.
+
+        The function's own key passes at once. Another token claiming the
+        service role passes if Supabase Auth, which verifies its signature,
+        accepts it for an admin call, so a forged one fails. Confirmed tokens
+        are remembered for the worker's lifetime.
+        """
+        token = self.token
+        if not token:
+            return False
+        if self.is_service or token in _service_tokens:
+            return True
+        url = env.get("SUPABASE_URL")
+        if not url or (self.user or {}).get("role") != "service_role":
+            return False
+        from supie.supabase import fetch
+
+        try:
+            response = await fetch(
+                "GET",
+                url.rstrip("/") + "/auth/v1/admin/users?page=1&per_page=1",
+                {"apikey": token, "Authorization": "Bearer " + token},
+            )
+        except Exception:
+            return False
+        if response["status"] != 200:
+            return False
+        _service_tokens.add(token)
+        return True
 
     @property
     def supabase(self) -> Supabase:
