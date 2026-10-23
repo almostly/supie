@@ -1,0 +1,40 @@
+# A pushed version tag (e.g. 0.1.0) publishes that version to PyPI through
+# trusted publishing: PyPI trusts this workflow, so no token is stored.
+name: release
+
+on:
+  push:
+    tags: ["[0-9]*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Check the tag matches the version
+        run: |
+          version=$(uv version --short)
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME doesn't match version $version in pyproject.toml"
+            exit 1
+          fi
+
+      - name: Tests
+        run: |
+          uv sync --locked
+          uv run pytest -q -m "not edge and not postgres"
+
+      - name: Build
+        run: uv build
+
+      - name: Publish
+        run: uv publish --trusted-publishing always
