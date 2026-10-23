@@ -41,6 +41,8 @@ The [prototype](prototype/) has the full measurements.
 
 A one-hour soak on hosted Supabase (eu-west-1, MicroPython, 2026-10-22), from a client in Europe: steady traffic of one inline scoring request and one queued application per second, a burst of 30 of each every 5 minutes, and one queued application in ten sent twice as a client retry.
 
+![An hour of traffic replayed in under a minute: requests flow through the edge function and the queue, and every application ends decided once or in the dead letters](https://github.com/almostly/supie/releases/download/0.1.0/supie-reliability-replay.gif)
+
 | | requests | succeeded | p50 | p90 | p99 |
 |---|---|---|---|---|---|
 | inline scoring | 3,916 | 99.95% | 0.31 s | 2.2 s | 3.8 s |
