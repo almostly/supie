@@ -17,7 +17,7 @@ def token(claims):
     return {"Authorization": f"Bearer x.{payload}.sig"}
 
 
-SERVICE = token({"role": "service_role"})
+SERVICE = {"Authorization": "Bearer service-role-key"}  # DEFAULT_ENV's key
 
 
 def scoring_queue(seen, fail_until=0, always_fail=False):
@@ -187,6 +187,9 @@ def test_send_from_handler_and_mounted_endpoints():
         "msg_id": 3
     }
     assert client.post("/queues/scoring/dead/99/replay", headers=SERVICE).status == 404
+    forged = token({"role": "service_role"})
+    assert client.post("/queues/scoring/work", headers=forged).status == 403
+    assert client.get("/queues/scoring/stats", headers=forged).status == 403
 
 
 def test_work_seconds_are_capped_and_checked():

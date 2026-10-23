@@ -206,6 +206,9 @@ def test_outputs_must_be_json():
         run(flow.run({}))
 
 
+SERVICE = {"Authorization": "Bearer service-role-key"}  # DEFAULT_ENV's key
+
+
 def token(claims):
     """A bearer token with these claims (the gateway would have verified it)."""
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
@@ -247,7 +250,21 @@ def test_mount_runs_are_private_to_their_user():
         client.get(path, headers=token({"role": "authenticated", "sub": "bob"})).status
         == 404
     )
-    assert client.get(path, headers=token({"role": "service_role"})).status == 200
+    assert client.get(path, headers=SERVICE).status == 200
+
+
+def test_claiming_the_service_role_is_not_enough():
+    """A token that only claims the service role, as anyone can send when
+    verify_jwt is off, can't read others' runs or call service endpoints.
+    """
+    client, _ = mounted()
+    alice = token({"role": "authenticated", "sub": "alice"})
+    run_id = client.post("/flows/scoring", json={"id": 1}, headers=alice).json()[
+        "run_id"
+    ]
+    forged = token({"role": "service_role"})
+    assert client.get(f"/flows/scoring/{run_id}", headers=forged).status == 404
+    assert client.post("/flows/scoring/resume-stale", headers=forged).status == 403
 
 
 def test_mount_resume_and_resume_stale():
@@ -263,8 +280,7 @@ def test_mount_resume_and_resume_stale():
     assert client.post("/flows/scoring/resume-stale").status == 403
     saved["status"] = "running"
     del saved["step_rows"]["decide"]
-    service = token({"role": "service_role"})
-    response = client.post("/flows/scoring/resume-stale", headers=service)
+    response = client.post("/flows/scoring/resume-stale", headers=SERVICE)
     assert response.json() == {"resumed": [run_id]}
     assert flow.store.runs[run_id]["status"] == "succeeded"
 

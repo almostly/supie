@@ -686,7 +686,7 @@ class Flow:
         @app.post(prefix + "/resume-stale")
         async def resume_stale(req: Request) -> dict[str, Any]:
             """Resume runs whose worker stopped (service role only)."""
-            if (req.user or {}).get("role") != "service_role":
+            if not req.is_service:
                 raise HTTPError(403, "needs the service role")
             idle = int(req.query.get("idle", "300"))
             ids = await flow._store().stale(flow.name, idle)
@@ -743,7 +743,7 @@ class Flow:
         @app.post(prefix + "/work")
         async def work_durable(req: Request) -> dict[str, int]:
             """Run waiting tasks (service role only)."""
-            if (req.user or {}).get("role") != "service_role":
+            if not req.is_service:
                 raise HTTPError(403, "needs the service role")
             seconds = int(req.query.get("seconds", "60"))
             return {"ran": await flow.work(req, seconds=seconds)}
@@ -752,10 +752,9 @@ class Flow:
         async def status_durable(req: Request, run_id: str) -> dict[str, Any]:
             """Read a run and its steps."""
             state = await flow.status(run_id)
-            claims = req.user or {}
             owner = state and state.get("owner")
-            hidden = owner and claims.get("role") != "service_role"
-            if state is None or (hidden and claims.get("sub") != owner):
+            hidden = owner and not req.is_service
+            if state is None or (hidden and _subject(req) != owner):
                 raise HTTPError(404, "no such run")
             state.pop("owner")
             return state
@@ -809,9 +808,8 @@ async def _visible(flow: Flow, req: Request, run_id: str) -> dict[str, Any]:
     saved = await flow._store().load(run_id)
     if saved is None or saved["flow"] != flow.name:
         raise HTTPError(404, "no such run")
-    claims = req.user or {}
     owner = saved.get("owner")
-    if owner and claims.get("role") != "service_role" and claims.get("sub") != owner:
+    if owner and not req.is_service and _subject(req) != owner:
         raise HTTPError(404, "no such run")
     return saved
 

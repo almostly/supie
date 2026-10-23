@@ -300,7 +300,7 @@ class Queue:
             outcomes = await gather(
                 *[self._handle(backend, m, request) for m in messages]
             )
-            handled = []
+            handled: list[int] = []
             for message, outcome in zip(messages, outcomes):
                 counts[outcome] += 1
                 if outcome == "handled":
@@ -365,7 +365,7 @@ class Queue:
 
         def service_only(req: Request) -> None:
             """Refuse anyone but the service role."""
-            if (req.user or {}).get("role") != "service_role":
+            if not req.is_service:
                 raise HTTPError(403, "needs the service role")
 
         @app.post(prefix + "/work")

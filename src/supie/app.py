@@ -213,7 +213,13 @@ class Request:
 
     @property
     def user(self) -> dict[str, Any] | None:
-        """The caller's JWT claims, or None. The Supabase gateway verifies the JWT."""
+        """The caller's JWT claims, or None.
+
+        The claims are decoded, not verified: Supabase's gateway checks the
+        signature only while the function has verify_jwt on, the default. With
+        it off, anyone can send any claims, so use is_service to authorize the
+        service role.
+        """
         token = self.token
         if not token or token.count(".") != 2:
             return None
@@ -221,6 +227,14 @@ class Request:
             return json.loads(_b64url_decode(token.split(".")[1]))
         except Exception:
             return None
+
+    @property
+    def is_service(self) -> bool:
+        """Whether the caller sent this project's service role key, compared in
+        constant time, so a token that merely claims the role doesn't pass.
+        """
+        token, key = self.token, env.get("SUPABASE_SERVICE_ROLE_KEY")
+        return bool(token and key) and compare_digest(token, key or "")
 
     @property
     def supabase(self) -> Supabase:

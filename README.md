@@ -63,11 +63,11 @@ You also need the [Supabase CLI](https://supabase.com/docs/guides/cli). The Pyod
 In a Supabase project (run `supabase init` first if you don't have one):
 
 ```bash
-supie init hello      # py/hello/main.py and py/hello/test_main.py
-pytest py/hello       # handlers are plain Python
-supie build           # writes supabase/functions/hello/
-supie serve           # supabase functions serve, rebuilding when py/ changes
-supie deploy          # supabase functions deploy, after building
+supie init hello  # py/hello/main.py and py/hello/test_main.py
+pytest py/hello  # handlers are plain Python
+supie build  # writes supabase/functions/hello/
+supie serve  # supabase functions serve, rebuilding when py/ changes
+supie deploy  # supabase functions deploy, after building
 ```
 
 Your Python lives in `py/<name>/`. `supie build` turns it into `supabase/functions/<name>/` and adds the function to `supabase/config.toml`. Treat the generated folder like a `dist/` directory: edit `py/`, never the output. supie refuses to overwrite a function it didn't generate.
@@ -107,7 +107,7 @@ def score(req: Request):
 
 - **Routes.** Use `app.get`, `post`, `put`, `patch` and `delete`, or `app.route(path, methods)`. Path parameters take a type: `{id:int}`, `{x:float}`, `{name}` for a string, and `{rest:path}` for the rest of the path. Paths are relative to the function, so `/` is `/functions/v1/<name>`.
 - **Handlers.** They can be plain functions or `async def`. They receive the request and the path parameters as keyword arguments.
-- **Requests.** A request has `method`, `path`, `query`, `headers` (lower case), `params`, `text()` and `json()`. `json()` answers 400 for a missing or invalid body. `req.user` holds the caller's JWT claims, and `req.token` the raw token.
+- **Requests.** A request has `method`, `path`, `query`, `headers` (lower case), `params`, `text()` and `json()`. `json()` answers 400 for a missing or invalid body. `req.user` holds the caller's JWT claims, and `req.token` the raw token. The claims are decoded, not verified: Supabase's gateway checks the signature only while the function keeps `verify_jwt` on. `req.is_service` is true only when the caller sent the project's service role key itself, and supie's work, replay and resume endpoints check that, so a token that merely claims the service role is refused.
 - **Return values.** A dict or list becomes JSON, a str becomes text, `bytes` stay binary, and `None` sends a 204. Return a `Response` to set the status, headers or content type.
 - **Errors.** `HTTPError(status, detail)` sends `{"error": detail}`. Any other exception sends a 500 to the caller and writes the traceback to the function's logs.
 - **Environment.** `env["NAME"]` and `env.get("NAME")` read environment variables and secrets at request time.
@@ -262,7 +262,7 @@ End to end is mostly the worker's cold start and the network. The Supabase store
 By default, checkpoints go to two tables in your project. Create them once:
 
 ```bash
-supie flow migration   # writes supabase/migrations/<timestamp>_supie_flows.sql
+supie flow migration  # writes supabase/migrations/<timestamp>_supie_flows.sql
 supabase db push
 ```
 
@@ -284,8 +284,8 @@ $$);
 Inline runs live inside one worker. For runs that must outlive any worker, run the same flow on [pgflow](https://pgflow.dev): Postgres schedules each step, keeps every output, and retries failed steps; supie's workers claim and run them.
 
 ```bash
-npx pgflow@0.17.2 install            # pgflow's schema and queues
-supie flow migration --pgflow        # functions that let supie's workers reach pgflow
+npx pgflow@0.17.2 install  # pgflow's schema and queues
+supie flow migration --pgflow  # functions that let supie's workers reach pgflow
 supabase db push
 ```
 
@@ -329,8 +329,8 @@ queue = Queue("scoring")
 
 @app.post("/score")
 async def score(req: Request) -> Response:
-    await queue.send(req.json())                 # durable once this returns
-    req.background(queue.work(req))              # optional: start right away
+    await queue.send(req.json())  # durable once this returns
+    req.background(queue.work(req))  # optional: start right away
     return Response({"queued": True}, status=202)
 
 
@@ -339,13 +339,15 @@ async def handle(ctx, message):
     ...
 
 
-queue.mount(app, "/queues/scoring")              # work, stats and replay endpoints
+queue.mount(app, "/queues/scoring")  # work, stats and replay endpoints
 ```
 
 ```bash
-supie queue migration     # pgmq, the supie_queue_* functions and the dead-letter table
+supie queue migration  # pgmq, the supie_queue_* functions and the dead-letter table
 supabase db push
 ```
+
+When you update supie, run `supie queue migration` again and redeploy the functions in the same release: the SQL functions and the Python that calls them change together.
 
 - **Delivery.** At least once. A message stays hidden for `visibility` seconds while it's handled, so keep that above the slowest handling; if a worker dies mid-message, it comes back after that.
 - **Retries.** A failed attempt (an exception, or `timeout` passed) comes back after about `backoff`, then twice that, and so on up to `max_backoff` (300 s), each delay shortened by up to half at random so retries after an outage don't all land at once. `ctx.attempt` says which attempt this is.
@@ -370,7 +372,7 @@ async def handle(ctx, message):
 - **`ctx.once(key, fn)`.** Runs `fn` once per key and stores its JSON result; any later delivery gets the stored result without running `fn`. While `fn` runs, the key holds a lease (`lease=`, five times the visibility by default; keep it above `fn`'s longest run), so a delivery arriving meanwhile comes back when the lease ends instead of running it in parallel, without using up an attempt. If `fn` raises or is cancelled, the lease is released and a retry runs it; a runner whose lease ran out can't release or finish the one that took over.
 - **The one gap.** If a worker dies after `fn` finished but before its result was stored, the next delivery runs `fn` again. That can't be closed for effects outside the database (an email, a payment API), so give those their own idempotency key where the API offers one.
 
-Tested with forced duplicates: a crash after the effect, a failed effect, concurrent deliveries of one effect, a message redelivered to a second worker mid-effect, and racing retries of one send, on pgmq and in the Edge Runtime on both runtimes. Keys and results stay in `supie_queue_keys` and `supie_queue_once`. `supie_queue_prune()` deletes those older than 7 days (pass `older_than`), and dead letters only when you pass `dead_older_than`; schedule it with pg_cron:
+Tested with forced duplicates: a crash after the effect, a failed effect, concurrent deliveries of one effect, a message redelivered to a second worker mid-effect, and racing retries of one send, on pgmq and in the Edge Runtime on both runtimes. Keys and results stay in `supie_queue_keys` and `supie_queue_once`. `supie_queue_prune()` deletes those older than 7 days (pass `older_than`), and dead letters only when you pass `dead_older_than`. A key deduplicates sends for as long as it's kept: a send repeated after its key was pruned enqueues again. Schedule it with pg_cron:
 
 ```sql
 select cron.schedule('supie-queue-prune', '0 3 * * *', 'select public.supie_queue_prune()');
@@ -434,8 +436,8 @@ preload = ["statistics", "decimal"]  # imported into the snapshot, so boot doesn
 A Pyodide function can use packages from PyPI: list them in a `requirements.txt` next to `main.py`, with pinned versions.
 
 ```text
-pydantic==2.12.5   # Pyodide's build, with its compiled core
-openpyxl==3.1.5    # pure Python, from PyPI
+pydantic==2.12.5  # Pyodide's build, with its compiled core
+openpyxl==3.1.5  # pure Python, from PyPI
 ```
 
 `supie build` installs them with micropip under Deno and ships them in the function. Pure-Python packages come from PyPI. Packages with compiled code only work if Pyodide builds them, such as pydantic, numpy and pandas, and those come from Pyodide's CDN. MicroPython functions can't use packages; put pure-Python modules in the function's folder instead.
@@ -462,7 +464,7 @@ Preloading your own module (`"main"` here) runs its module-level code at build t
 
 The cost is size. pydantic preloaded makes the function about 18 MB of Supabase's 20 MB limit, so heavier stacks such as pandas won't fit.
 
-Other settings: `verify_jwt` (default `true`) and, for MicroPython, `heap_mb` (default 16). A `[project]` table can move the source folder (`source = "py"`) or the Supabase folder (`supabase = "supabase"`).
+Other settings: `verify_jwt` (default `true`; turned off, anyone can send any claims in `req.user`, so authorize with `req.is_service` or your own checks) and, for MicroPython, `heap_mb` (default 16). A `[project]` table can move the source folder (`source = "py"`) or the Supabase folder (`supabase = "supabase"`).
 
 ## How it works
 
@@ -487,9 +489,9 @@ All of supie's Python is annotated, including the modules that run in the functi
 
 ```bash
 uv sync
-uv run pytest -m "not edge and not postgres"   # unit tests
-uv run pytest -m "edge or postgres"   # Edge Runtime, Postgres, PostgREST and pgflow, needs Docker
-uv run ty check src tests scripts examples   # types
+uv run pytest -m "not edge and not postgres"  # unit tests
+uv run pytest -m "edge or postgres"  # Edge Runtime, Postgres, PostgREST and pgflow, needs Docker
+uv run ty check src tests scripts examples  # types
 ```
 
 CI runs the Docker tests against pinned images. A weekly workflow runs them against the images the Supabase CLI ships that day, so a new Edge Runtime, Postgres or PostgREST release that breaks supie shows up before users hit it.
