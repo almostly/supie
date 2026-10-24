@@ -61,8 +61,10 @@ def test_a_rejection_is_remembered_for_a_minute(clock):
     assert calls == 1 and auth.calls == 2
 
 
-def test_a_verified_token_is_checked_again_after_it_expires(clock):
-    """A verified user token is trusted until its exp, then checked again."""
+def test_a_verified_token_is_trusted_until_it_expires(clock):
+    """A verified user token is trusted until its exp; after that it's
+    refused locally, without asking Auth.
+    """
     auth = Auth()
     claims = {**ALICE, "exp": clock[0] + 10}
     token = jwt(claims)
@@ -77,8 +79,8 @@ def test_a_verified_token_is_checked_again_after_it_expires(clock):
         return [first[0], second[0], third[0]], calls
 
     states, calls = run(scenario(), fetch=auth)
-    assert states == ["ok", "ok", "ok"]
-    assert calls == 1 and auth.calls == 2
+    assert states == ["ok", "ok", "invalid"]
+    assert calls == 1 and auth.calls == 1
 
 
 def test_trust_lasts_at_most_an_hour(clock):
@@ -126,13 +128,14 @@ def test_concurrent_checks_of_one_token_share_one_call():
 
     async def scenario():
         """One check finishes while another waits on it."""
-        runtime._in_flight[token] = True
+        digest = runtime._digest(token)
+        runtime._in_flight[digest] = True
 
         async def finish():
             """The first check completes."""
             await sleep(0.1)
-            runtime._users[token] = (runtime._clock() + 60, None)
-            del runtime._in_flight[token]
+            runtime._users[digest] = (runtime._clock() + 60, None)
+            del runtime._in_flight[digest]
 
         results = []
 
@@ -147,18 +150,111 @@ def test_concurrent_checks_of_one_token_share_one_call():
     assert auth.calls == 0
 
 
-def test_too_many_checks_at_once_fail_closed():
-    """Past the in-flight limit, a new token isn't checked at all."""
+def test_too_many_checks_at_once_wait_then_fail_closed():
+    """Past the in-flight limit, a new token waits up to a second for a slot:
+    it's checked if one frees up, and refused untried if none does.
+    """
     auth = Auth()
 
-    async def scenario():
+    async def full():
         """Fill the limit with other tokens, then check one more."""
         for n in range(runtime._MAX_IN_FLIGHT):
             runtime._in_flight[f"other-{n}"] = True
         return (await runtime._lookup(jwt(ALICE), "user", ALICE))[0]
 
-    assert run(scenario(), fetch=auth) == "unavailable"
+    assert run(full(), fetch=auth, sleep_scale=0.05) == "unavailable"
     assert auth.calls == 0
+
+    async def frees():
+        """A slot frees up while the check waits."""
+        for n in range(runtime._MAX_IN_FLIGHT):
+            runtime._in_flight[f"other-{n}"] = True
+
+        async def release():
+            """One running check finishes."""
+            await sleep(0.2)
+            del runtime._in_flight["other-0"]
+
+        results = []
+
+        async def check():
+            """The waiting check."""
+            results.append((await runtime._lookup(jwt(ALICE), "user", ALICE))[0])
+
+        await gather(check(), release())
+        return results[0]
+
+    assert run(frees(), fetch=auth) == "ok"
+    assert auth.calls == 1
+
+
+def test_implausible_tokens_are_refused_without_asking(clock):
+    """An expired token, or one issued for another project, costs no Auth call."""
+    auth = Auth()
+    expired = {**ALICE, "exp": clock[0] - 1}
+    elsewhere = {**ALICE, "ref": "otherproject"}
+    here = {**ALICE, "ref": "abcdefghijklmnop"}
+    env = {"SUPABASE_URL": "https://abcdefghijklmnop.supabase.co"}
+    for claims, expected in (
+        (expired, "invalid"),
+        (elsewhere, "invalid"),
+        (here, "ok"),
+    ):
+        assert (
+            run(runtime._lookup(jwt(claims), "user", claims), env=env, fetch=auth)[0]
+            == expected
+        )
+    assert auth.calls == 1
+
+
+def test_caches_hold_digests_not_tokens():
+    """No cache keeps the raw token."""
+    auth = Auth()
+    token = jwt(ALICE)
+
+    async def scenario():
+        """Verify, then look at the cache keys."""
+        await runtime._lookup(token, "user", ALICE)
+        return list(runtime._users)
+
+    assert run(scenario(), fetch=auth) == [runtime._digest(token)]
+
+
+def test_oversized_tokens_and_refused_service_tokens(capsys):
+    """A bearer token over 4 KB is refused without a check, and a service
+    role token Auth refuses is logged with the status, not the token.
+    """
+    from supie import App
+    from supie.testing import TestClient
+
+    app = App()
+    calls = []
+
+    def refuse(call):
+        """Auth refuses everything."""
+        calls.append(call.url)
+        return FakeResponse({"msg": "invalid JWT"}, 401)
+
+    @app.get("/user")
+    async def user(req):
+        """Verify the caller."""
+        return {"user": await req.verified_user()}
+
+    @app.get("/service")
+    async def service(req):
+        """Check the service role."""
+        return {"service": await req.check_service()}
+
+    client = TestClient(app, fetch=refuse)
+    big = jwt({**ALICE, "pad": "x" * 5000})
+    assert client.get("/user", headers={"Authorization": "Bearer " + big}).status == 401
+    forged = jwt({"role": "service_role"})
+    assert client.get(
+        "/service", headers={"Authorization": "Bearer " + forged}
+    ).json() == {"service": False}
+    assert len(calls) == 1
+    out = capsys.readouterr().out
+    assert "refused a service role token, status 401" in out and forged not in out
 
 
 def test_caches_stay_bounded(clock):

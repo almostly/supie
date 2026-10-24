@@ -88,8 +88,9 @@ _VERIFIED_SECONDS = (
 _REJECTED_SECONDS = 60.0  # how long a token Auth refused is refused without asking
 _CACHE_SIZE = 1024
 _REJECTED_SIZE = 256
-_MAX_IN_FLIGHT = 4  # Auth checks at once per worker; more fail closed
-# token -> (trusted until, payload)
+_MAX_IN_FLIGHT = 16  # Auth checks at once per worker; a request waits up to 1 s for one
+_MAX_TOKEN = 4096  # longer bearer tokens are refused without a check
+# sha256 of the token -> (trusted until, payload)
 _service_tokens: dict[str, tuple[float, Any]] = {}  # confirmed as the service role
 _users: dict[str, tuple[float, Any]] = {}  # confirmed as a signed-in user
 _rejected: dict[str, tuple[float, Any]] = {}  # refused by Auth
@@ -233,41 +234,69 @@ async def _lookup(token: str, kind: str, claims: dict[str, Any]) -> tuple[str, A
     """Check a token with Supabase Auth, through the caches: ("ok", payload),
     ("invalid", None) or ("unavailable", None).
 
-    A check of the same token already running is waited for, not repeated.
-    Past _MAX_IN_FLIGHT checks at once, or when Auth can't answer, the result
-    is "unavailable" and nothing is cached, so callers fail closed.
+    Caches hold a SHA-256 digest of the token, never the token. A token that
+    is expired, or issued for another project, is refused without a call. A
+    check of the same token already running is waited for, not repeated, and
+    a request waits up to a second for one of _MAX_IN_FLIGHT slots. Past
+    that, or when Auth can't answer, the result is "unavailable" and nothing
+    is cached, so callers fail closed.
     """
+    if not _plausible(claims):
+        return "invalid", None
     cache = _service_tokens if kind == "service" else _users
+    digest = _digest(token)
     for _ in range(100):
         now = _clock()
-        hit = cache.get(token)
+        hit = cache.get(digest)
         if hit is not None and hit[0] > now:
             return "ok", hit[1]
-        refused = _rejected.get(token)
+        refused = _rejected.get(digest)
         if refused is not None and refused[0] > now:
             return "invalid", None
-        if token not in _in_flight:
+        if digest not in _in_flight and len(_in_flight) < _MAX_IN_FLIGHT:
             break
+        if digest not in _in_flight and _ >= 20:  # waited a second for a slot
+            return "unavailable", None
         await sleep(0.05)
     else:
         return "unavailable", None
-    if len(_in_flight) >= _MAX_IN_FLIGHT:
-        return "unavailable", None
-    _in_flight[token] = True
+    _in_flight[digest] = True
     try:
         state, payload = await _ask_auth(token, kind, claims)
     finally:
-        del _in_flight[token]
+        del _in_flight[digest]
     now = _clock()
     if state == "ok":
         until = now + _VERIFIED_SECONDS
         exp = claims.get("exp")
         if isinstance(exp, (int, float)):
             until = min(until, float(exp))
-        _remember(cache, token, until, payload, _CACHE_SIZE)
+        _remember(cache, digest, until, payload, _CACHE_SIZE)
     elif state == "invalid":
-        _remember(_rejected, token, now + _REJECTED_SECONDS, None, _REJECTED_SIZE)
+        _remember(_rejected, digest, now + _REJECTED_SECONDS, None, _REJECTED_SIZE)
     return state, payload
+
+
+def _digest(token: str) -> str:
+    """The cache key for a token: its SHA-256, so caches hold no credentials."""
+    import binascii
+    import hashlib
+
+    return binascii.hexlify(hashlib.sha256(token.encode()).digest()).decode()
+
+
+def _plausible(claims: dict[str, Any]) -> bool:
+    """Whether a token is worth asking Auth about: not expired, and, on a
+    supabase.co project, issued for this project.
+    """
+    exp = claims.get("exp")
+    if isinstance(exp, (int, float)) and exp <= _clock():
+        return False
+    ref = claims.get("ref")
+    host = (env.get("SUPABASE_URL") or "").split("://")[-1].split("/")[0]
+    if isinstance(ref, str) and host.endswith(".supabase.co"):
+        return host.split(".")[0] == ref
+    return True
 
 
 async def _ask_auth(token: str, kind: str, claims: dict[str, Any]) -> tuple[str, Any]:
@@ -295,6 +324,11 @@ async def _ask_auth(token: str, kind: str, claims: dict[str, Any]) -> tuple[str,
         return "unavailable", None
     status = response["status"]
     if status in (400, 401, 403, 404):
+        if kind == "service":
+            print(
+                "supie: Supabase Auth refused a service role token, status "
+                + str(status)
+            )
         return "invalid", None
     if status != 200:
         return "unavailable", None
@@ -422,7 +456,7 @@ class Request:
         if self.is_service:
             return True
         claims = self.user or {}
-        if claims.get("role") != "service_role":
+        if claims.get("role") != "service_role" or len(token) > _MAX_TOKEN:
             return False
         state, _ = await _lookup(token, "service", claims)
         return state == "ok"
@@ -438,6 +472,8 @@ class Request:
         hour, in this worker.
         """
         token = self.token
+        if token and len(token) > _MAX_TOKEN:
+            raise HTTPError(401, "invalid token")
         claims = self.user
         if token and claims is None and token[:3] != "sb_":
             raise HTTPError(401, "invalid token")

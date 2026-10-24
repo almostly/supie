@@ -113,7 +113,7 @@ supabase db push
 ```python
 scoring.mount(app, "/flows/scoring", durable=True)
 
-# or from your own handler:
+# or from your own handler; raises HTTPError 401 or 503 when the caller's token can't be verified:
 run_id = await scoring.start(application, request=req)
 state = await scoring.status(run_id)
 ```
