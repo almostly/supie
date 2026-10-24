@@ -271,3 +271,23 @@ def test_durable_flow_in_the_edge_runtime(edge_pgflow, fn):
     assert state["status"] == "completed", f"{state['status']} {errors}\n{logs()}"
     assert state["output"] == {"review": {"decision": "refer", "id": 11}}
     assert state["steps"]["approve"]["status"] == "skipped"
+
+
+@pytest.mark.edge
+@pytest.mark.parametrize("fn", ["durable", "durable-pyodide"])
+def test_a_forged_user_token_cant_start_a_run_in_the_edge_runtime(edge_pgflow, fn):
+    """On both runtimes, a forged user token reaches supie's token check (its
+    hashing included) and is refused with 401 or 503, never a 500.
+    """
+    edge_base, json, _ = edge_pgflow
+    claims = {"role": "authenticated", "sub": "alice", "exp": int(time.time()) + 600}
+    forged = jwt(claims)[:-4] + "AAAA"
+    request = urllib.request.Request(
+        f"{edge_base}/{fn}/flows",
+        data=json.dumps({"id": 12}).encode(),
+        method="POST",
+        headers={"Authorization": f"Bearer {forged}"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        urllib.request.urlopen(request, timeout=60)
+    assert refused.value.code in (401, 503), refused.value.read()[:300]

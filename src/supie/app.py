@@ -245,7 +245,7 @@ async def _lookup(token: str, kind: str, claims: dict[str, Any]) -> tuple[str, A
         return "invalid", None
     cache = _service_tokens if kind == "service" else _users
     digest = _digest(token)
-    for _ in range(100):
+    for tries in range(100):
         now = _clock()
         hit = cache.get(digest)
         if hit is not None and hit[0] > now:
@@ -255,7 +255,7 @@ async def _lookup(token: str, kind: str, claims: dict[str, Any]) -> tuple[str, A
             return "invalid", None
         if digest not in _in_flight and len(_in_flight) < _MAX_IN_FLIGHT:
             break
-        if digest not in _in_flight and _ >= 20:  # waited a second for a slot
+        if digest not in _in_flight and tries >= 20:  # waited a second for a slot
             return "unavailable", None
         await sleep(0.05)
     else:
