@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/almostly/supie/main/docs/images/supie_icon.png" width="128" alt="supie">
+  <img src="https://oblako-public.s3.amazonaws.com/supie_icon.png" width="128" alt="supie">
 </p>
 
 # supie
@@ -61,7 +61,7 @@ Handling a request costs about the same as TypeScript, but a Python loop runs 45
 
 In a one-hour run on hosted Supabase, 99.95% of 3,916 scoring requests and 99.77% of 4,258 queued applications succeeded, with no server errors, and every application ended exactly once. See [performance and reliability](https://github.com/almostly/supie/blob/main/docs/performance.md).
 
-![Scoring traffic through a supie edge function: requests answered inline or queued in Postgres, and each queued application decided once or kept in the dead letters](https://raw.githubusercontent.com/almostly/supie/main/docs/images/supie_flow.png)
+![Scoring traffic through a supie edge function: requests answered inline or queued in Postgres, and each queued application decided once or kept in the dead letters](https://oblako-public.s3.amazonaws.com/supie_flow.png)
 
 ## Handlers
 
