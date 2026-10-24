@@ -654,10 +654,14 @@ class Flow:
             payload["error_message"] = format_exception(error)[-2000:]
             await db.rpc("supie_pgflow_fail", payload)
 
-    def mount(self, app: App, prefix: str, durable: bool = False) -> Flow:
+    def mount(
+        self, app: App, prefix: str, durable: bool = False, max_seconds: float = 140
+    ) -> Flow:
         """Add endpoints to start a run, read its status and resume it.
 
-        With durable=True the run happens on pgflow instead (see _mount_durable).
+        With durable=True the run happens on pgflow instead (see _mount_durable),
+        and the work endpoint's ?seconds= is capped at max_seconds, below the
+        Edge Functions' wall-clock limit (150 s on the free plan).
 
         POST prefix starts a run with the JSON body as input and answers 202 with
         its run_id. GET prefix/<run_id> reads the run. POST prefix/<run_id>/resume
@@ -666,7 +670,7 @@ class Flow:
         A run started by a signed-in user is visible only to that user.
         """
         if durable:
-            return self._mount_durable(app, prefix)
+            return self._mount_durable(app, prefix, max_seconds)
         flow = self
 
         @app.post(prefix)
@@ -688,7 +692,7 @@ class Flow:
             """Resume runs whose worker stopped (service role only)."""
             if not await req.check_service():
                 raise HTTPError(403, "needs the service role")
-            idle = int(req.query.get("idle", "300"))
+            idle = int(_number(req, "idle", 300))
             ids = await flow._store().stale(flow.name, idle)
             for run_id in ids:
                 req.background(flow._background(run_id, None))
@@ -718,7 +722,7 @@ class Flow:
 
         return flow
 
-    def _mount_durable(self, app: App, prefix: str) -> Flow:
+    def _mount_durable(self, app: App, prefix: str, max_seconds: float) -> Flow:
         """Endpoints for durable runs on pgflow.
 
         POST prefix starts a run with the JSON body as input, answers 202 with
@@ -745,7 +749,7 @@ class Flow:
             """Run waiting tasks (service role only)."""
             if not await req.check_service():
                 raise HTTPError(403, "needs the service role")
-            seconds = int(req.query.get("seconds", "60"))
+            seconds = min(max(_number(req, "seconds", 60), 0), max_seconds)
             return {"ran": await flow.work(req, seconds=seconds)}
 
         @app.get(prefix + "/{run_id}")
@@ -793,6 +797,17 @@ def _now() -> float:
     if hasattr(time, "ticks_ms"):
         return time.ticks_ms() / 1000
     return time.time()
+
+
+def _number(req: Request, name: str, default: float) -> float:
+    """A numeric query parameter, or 400 when it isn't a finite number."""
+    try:
+        value = float(req.query.get(name, str(default)))
+    except ValueError:
+        value = float("nan")
+    if value != value or abs(value) == float("inf"):
+        raise HTTPError(400, name + " must be a number")
+    return value
 
 
 def _subject(req: Request) -> str | None:

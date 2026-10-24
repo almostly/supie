@@ -122,7 +122,7 @@ state = await scoring.status(run_id)
 |---|---|
 | `POST <prefix>` | Starts a run on pgflow, answers 202 with its `run_id`, and works on it after the response. |
 | `GET <prefix>/<run_id>` | Returns the status, output and each step's state, including skipped steps and errors. |
-| `POST <prefix>/work?seconds=60` | For the service role: claims and runs waiting tasks. Call it from pg_cron, so runs continue after a worker stops. |
+| `POST <prefix>/work?seconds=60` | For the service role: claims and runs waiting tasks. Call it from pg_cron, so runs continue after a worker stops. `seconds` is capped at `mount(..., max_seconds=140)`, under the free plan's 150 s limit. |
 
 - **The flow compiles itself.** On a worker's first run, supie sends the flow's shape to pgflow. A shape that differs from the one in the database is an error, so change a durable flow by giving it a new name.
 - **Retries are pgflow's.** `retries` and `backoff` become pgflow's max attempts and base delay; a failed attempt goes back to the queue.

@@ -4,6 +4,8 @@
 
 ### Added
 
+- The durable flow work endpoint caps `?seconds=` at `mount(..., durable=True, max_seconds=140)`, like the queue's, and it and `resume-stale` answer 400 for a value that isn't a finite number instead of a 500.
+
 - `req.check_service()` accepts the project's secret API keys (`sb_secret_...`) in the `apikey` header or as a bearer token, compared in constant time with the keys in `SUPABASE_SECRET_KEYS`, or `SUPABASE_SECRET_KEY` for a single key, with no call to Supabase Auth. Verified on hosted Supabase.
 
 ## v0.1.1 (2026-10-23)

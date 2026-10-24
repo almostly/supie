@@ -267,6 +267,38 @@ def test_claiming_the_service_role_is_not_enough():
     assert client.post("/flows/scoring/resume-stale", headers=forged).status == 403
 
 
+def test_number_parameters_are_checked_and_capped():
+    """The durable work endpoint caps ?seconds= and answers 400 for a value
+    that isn't a finite number, as does resume-stale's ?idle=.
+    """
+    app = App()
+    flow = scoring_flow()
+    asked = []
+
+    async def work(request=None, seconds=60.0, idle_polls=3):
+        """Record the seconds instead of reaching pgflow."""
+        asked.append(seconds)
+        return 0
+
+    flow.work = work
+    flow.mount(app, "/durable", durable=True, max_seconds=30)
+    scoring_flow().mount(app, "/inline")
+    client = TestClient(app)
+    for bad in ("abc", "nan", "inf"):
+        assert (
+            client.post(f"/durable/work?seconds={bad}", headers=SERVICE).status == 400
+        )
+        assert (
+            client.post(f"/inline/resume-stale?idle={bad}", headers=SERVICE).status
+            == 400
+        )
+    assert client.post("/durable/work?seconds=1000", headers=SERVICE).json() == {
+        "ran": 0
+    }
+    assert client.post("/durable/work?seconds=-5", headers=SERVICE).json() == {"ran": 0}
+    assert asked == [30, 0]
+
+
 def test_mount_resume_and_resume_stale():
     """resume continues a run; resume-stale needs the service role."""
     client, flow = mounted()
