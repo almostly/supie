@@ -217,6 +217,25 @@ def test_service_tokens_are_checked_with_supabase_auth():
     assert len(auth_calls) == 2, "the genuine token is checked once"
 
 
+def test_secret_api_keys_pass_the_service_check():
+    """Any of the project's secret keys passes, in the apikey header or as a
+    bearer token, compared locally; an unknown or publishable key doesn't.
+    """
+    app = App()
+    Queue("secret_keyed", MemoryQueue()).mount(app, "/q")
+    keys = '{"default": "sb_secret_default", "jobs": "sb_secret_jobs"}'
+    client = TestClient(app, env={"SUPABASE_SECRET_KEYS": keys})
+    assert client.get("/q/stats", headers={"apikey": "sb_secret_jobs"}).status == 200
+    bearer = {"Authorization": "Bearer sb_secret_default"}
+    assert client.get("/q/stats", headers=bearer).status == 200
+    for key in ("sb_secret_other", "sb_publishable_default", "sb_secret_"):
+        assert client.get("/q/stats", headers={"apikey": key}).status == 403
+    assert client.calls == [], "secret keys are checked without calling Auth"
+
+    single = TestClient(app, env={"SUPABASE_SECRET_KEY": "sb_secret_local"})
+    assert single.get("/q/stats", headers={"apikey": "sb_secret_local"}).status == 200
+
+
 def test_work_seconds_are_capped_and_checked():
     """The work endpoint caps ?seconds= at max_seconds and rejects a non-number."""
     app = App()

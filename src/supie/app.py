@@ -152,6 +152,23 @@ class State:
     """A plain namespace for whatever on_boot sets up, shared across requests."""
 
 
+def _secret_keys() -> list[str]:
+    """The project's secret API keys: SUPABASE_SECRET_KEYS, a JSON object of
+    named keys that hosted Supabase sets, or SUPABASE_SECRET_KEY for one key.
+    """
+    raw = env.get("SUPABASE_SECRET_KEYS")
+    if raw:
+        try:
+            keys = json.loads(raw)
+        except ValueError:
+            return []
+        if not isinstance(keys, dict):
+            return []
+        return [value for value in keys.values() if isinstance(value, str) and value]
+    single = env.get("SUPABASE_SECRET_KEY")
+    return [single] if single else []
+
+
 def _b64url_decode(segment: str) -> bytes:
     """Decode a base64url segment without padding, as JWTs use."""
     import binascii
@@ -240,14 +257,22 @@ class Request:
         return bool(token and key) and compare_digest(token, key or "")
 
     async def check_service(self) -> bool:
-        """Whether the caller holds a service role key for this project.
+        """Whether the caller holds a service-level key for this project.
 
-        The function's own key passes at once. Another token claiming the
-        service role passes if Supabase Auth, which verifies its signature,
-        accepts it for an admin call, so a forged one fails. Confirmed tokens
-        are remembered for the worker's lifetime.
+        A secret API key (sb_secret_..., sent in the apikey header as Supabase
+        recommends, or as a bearer token) passes if it equals one of the
+        project's secret keys, compared in constant time. A legacy service
+        role key passes if it is the function's own; another token claiming
+        the service role passes if Supabase Auth, which verifies its
+        signature, accepts it for an admin call, so a forged one fails.
+        Confirmed tokens are remembered for the worker's lifetime.
         """
         token = self.token
+        for key in (self.headers.get("apikey"), token):
+            if key and key[:10] == "sb_secret_":
+                for secret in _secret_keys():
+                    if compare_digest(key, secret):
+                        return True
         if not token:
             return False
         if self.is_service or token in _service_tokens:
