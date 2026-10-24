@@ -535,7 +535,7 @@ class Flow:
     async def start(self, input: Any = None, request: Request | None = None) -> str:
         """Start a durable run on pgflow and return its ID; workers run its steps."""
         await self._ensure_compiled()
-        owner = _subject(request) if request is not None else None
+        owner = await _subject(request) if request is not None else None
         result = await self._pgflow().rpc(
             "supie_pgflow_start",
             {"flow_slug": self.name, "input": _jsonable(input), "owner": owner},
@@ -679,7 +679,8 @@ class Flow:
             store = flow._store()
             run_id = new_id()
             body = req.json() if req.body else None
-            await store.create(run_id, flow.name, _jsonable(body), _subject(req))
+            owner = await _subject(req)
+            await store.create(run_id, flow.name, _jsonable(body), owner)
             req.background(flow._background(run_id, req))
             return Response(
                 {"run_id": run_id, "status": "running"},
@@ -692,7 +693,7 @@ class Flow:
             """Resume runs whose worker stopped (service role only)."""
             if not await req.check_service():
                 raise HTTPError(403, "needs the service role")
-            idle = int(_number(req, "idle", 300))
+            idle = max(int(req.query_number("idle", 300)), 1)
             ids = await flow._store().stale(flow.name, idle)
             for run_id in ids:
                 req.background(flow._background(run_id, None))
@@ -749,7 +750,7 @@ class Flow:
             """Run waiting tasks (service role only)."""
             if not await req.check_service():
                 raise HTTPError(403, "needs the service role")
-            seconds = min(max(_number(req, "seconds", 60), 0), max_seconds)
+            seconds = min(max(req.query_number("seconds", 60), 0), max_seconds)
             return {"ran": await flow.work(req, seconds=seconds)}
 
         @app.get(prefix + "/{run_id}")
@@ -758,7 +759,7 @@ class Flow:
             state = await flow.status(run_id)
             owner = state and state.get("owner")
             hidden = owner and not await req.check_service()
-            if state is None or (hidden and _subject(req) != owner):
+            if state is None or (hidden and await _subject(req) != owner):
                 raise HTTPError(404, "no such run")
             state.pop("owner")
             return state
@@ -799,23 +800,13 @@ def _now() -> float:
     return time.time()
 
 
-def _number(req: Request, name: str, default: float) -> float:
-    """A numeric query parameter, or 400 when it isn't a finite number."""
-    try:
-        value = float(req.query.get(name, str(default)))
-    except ValueError:
-        value = float("nan")
-    if value != value or abs(value) == float("inf"):
-        raise HTTPError(400, name + " must be a number")
-    return value
-
-
-def _subject(req: Request) -> str | None:
-    """The signed-in user's ID, or None for anonymous and service role callers."""
-    claims = req.user or {}
-    if claims.get("role") == "authenticated":
-        return claims.get("sub")
-    return None
+async def _subject(req: Request) -> str | None:
+    """The signed-in user's ID, verified with Supabase Auth, or None for a
+    caller without a user token. A token that can't be verified raises 401
+    or 503 instead of counting as anonymous.
+    """
+    user = await req.verified_user()
+    return user.get("sub") if user else None
 
 
 async def _visible(flow: Flow, req: Request, run_id: str) -> dict[str, Any]:
@@ -824,7 +815,7 @@ async def _visible(flow: Flow, req: Request, run_id: str) -> dict[str, Any]:
     if saved is None or saved["flow"] != flow.name:
         raise HTTPError(404, "no such run")
     owner = saved.get("owner")
-    if owner and _subject(req) != owner and not await req.check_service():
+    if owner and not await req.check_service() and await _subject(req) != owner:
         raise HTTPError(404, "no such run")
     return saved
 

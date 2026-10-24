@@ -223,6 +223,7 @@ class TestClient:
         test with its traceback instead of returning a 500.
         """
         self.app = app
+        runtime.forget_tokens()  # each client starts like a fresh worker
         self.host = FakeHost({**DEFAULT_ENV, **(env or {})}, fetch)
         self.raise_errors = raise_errors
         self.sleep_scale = 1.0  # shrink retry delays: 0 skips them
@@ -305,6 +306,7 @@ def run(
     """
     host = FakeHost({**DEFAULT_ENV, **(env or {})}, fetch)
     host.sleep_scale = sleep_scale
+    runtime.forget_tokens()
 
     async def bound() -> Any:
         """Await with the fake host bound."""

@@ -65,7 +65,7 @@ scoring.mount(app, "/flows/scoring")  # or start runs in the background
 | `POST <prefix>/<run_id>/resume` | Continues a run whose worker stopped. |
 | `POST <prefix>/resume-stale?idle=300` | For the service role: resumes every run idle that long. Call it from pg_cron. |
 
-A run started by a signed-in user is visible only to that user and the service role. Anyone else holding the random run ID can read a run started anonymously.
+A run started by a signed-in user is visible only to that user and the service role. supie verifies the user's token with Supabase Auth before recording or comparing the owner, so the check holds with `verify_jwt` off: a token Auth refuses gets 401, and 503 when Auth can't be reached, instead of starting an anonymous run. Anyone else holding the random run ID can read a run started without a token.
 
 ## Inline speed
 

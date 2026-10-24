@@ -4,9 +4,15 @@
 
 ### Added
 
-- The durable flow work endpoint caps `?seconds=` at `mount(..., durable=True, max_seconds=140)`, like the queue's, and it and `resume-stale` answer 400 for a value that isn't a finite number instead of a 500.
-
+- `req.verified_user()`: a signed-in caller's claims after Supabase Auth has verified the token, or 401 for a token Auth refuses and 503 when Auth can't be reached.
+- `req.query_number(name, default)`: a numeric query parameter, or 400 when it isn't a finite number.
 - `req.check_service()` accepts the project's secret API keys (`sb_secret_...`) in the `apikey` header or as a bearer token, compared in constant time with the keys in `SUPABASE_SECRET_KEYS`, or `SUPABASE_SECRET_KEY` for a single key, with no call to Supabase Auth. Verified on hosted Supabase.
+
+### Fixed
+
+- Flow run ownership is verified with Supabase Auth. With `verify_jwt` off, a token claiming another user's ID could read or resume their run, and a forged ID was recorded as the owner of a new run; such tokens now get 401, and a start whose token can't be verified creates no run.
+- Token checks with Supabase Auth are bounded: refused tokens are remembered for a minute, verified ones until they expire and at most an hour, caches hold at most 1,024 tokens, a worker checks at most four tokens at once and fails closed past that, and Auth errors are never cached.
+- The durable flow work endpoint caps `?seconds=` at `mount(..., durable=True, max_seconds=140)`, like the queue's. It, the queue's work endpoint and `resume-stale` answer 400 for a value that isn't a finite number, and `resume-stale` treats an idle time under 1 s as 1 s, so it can't resume runs whose workers are alive.
 
 ## v0.1.1 (2026-10-23)
 

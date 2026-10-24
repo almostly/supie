@@ -168,11 +168,31 @@ def postgres_rest(images, setup):
         subprocess.run(["docker", "network", "rm", network], capture_output=True)
 
 
+def auth_user(token):
+    """Supabase Auth's GET /auth/v1/user: the user of a token signed with the
+    test secret, or 401.
+    """
+    try:
+        head, payload, sig = token.split(".")
+    except ValueError:
+        return FakeResponse({"msg": "invalid JWT"}, 401)
+    expected = hmac.new(
+        SECRET.encode(), (head + "." + payload).encode(), hashlib.sha256
+    )
+    given = base64.urlsafe_b64decode(sig + "=" * (-len(sig) % 4))
+    if not hmac.compare_digest(expected.digest(), given):
+        return FakeResponse({"msg": "invalid JWT"}, 401)
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    return FakeResponse({"id": claims.get("sub")})
+
+
 def proxy(base):
     """A fetch that sends the Supabase client's REST calls to the local PostgREST."""
 
     def fetch(call):
         """Forward one call and return PostgREST's answer."""
+        if call.url.endswith("/auth/v1/user"):
+            return auth_user(call.headers.get("Authorization", "")[7:])
         url = call.url.replace("https://test.supabase.co/rest/v1", base)
         data = call.body.encode() if isinstance(call.body, str) else call.body
         request = urllib.request.Request(

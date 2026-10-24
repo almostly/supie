@@ -82,7 +82,18 @@ REASONS = {
 _host: Host | None = None  # the shim's JS module in the function, a fake in tests
 _pending: dict[int, list[Awaitable[Any]]] = {}  # background tasks per request
 _next_id = [0]
-_service_tokens: set[str] = set()  # tokens Supabase Auth confirmed as the service role
+_VERIFIED_SECONDS = (
+    3600.0  # longest a verified token is trusted without asking Auth again
+)
+_REJECTED_SECONDS = 60.0  # how long a token Auth refused is refused without asking
+_CACHE_SIZE = 1024
+_REJECTED_SIZE = 256
+_MAX_IN_FLIGHT = 4  # Auth checks at once per worker; more fail closed
+# token -> (trusted until, payload)
+_service_tokens: dict[str, tuple[float, Any]] = {}  # confirmed as the service role
+_users: dict[str, tuple[float, Any]] = {}  # confirmed as a signed-in user
+_rejected: dict[str, tuple[float, Any]] = {}  # refused by Auth
+_in_flight: dict[str, bool] = {}  # being checked with Auth now
 
 
 def set_host(host: Host | None) -> None:
@@ -168,6 +179,138 @@ def _secret_keys() -> list[str]:
             ]
     single = env.get("SUPABASE_SECRET_KEY")
     return [single] if single else []
+
+
+def _public_key() -> str | None:
+    """A key to call Auth as the public: the anon key, or a publishable key."""
+    key = env.get("SUPABASE_ANON_KEY")
+    if key:
+        return key
+    raw = env.get("SUPABASE_PUBLISHABLE_KEYS")
+    if raw:
+        try:
+            keys = json.loads(raw)
+        except ValueError:
+            keys = None
+        if isinstance(keys, dict):
+            for value in keys.values():
+                if isinstance(value, str) and value:
+                    return value
+    return env.get("SUPABASE_PUBLISHABLE_KEY")
+
+
+def forget_tokens() -> None:
+    """Empty the token caches, as a fresh worker starts: for tests."""
+    for cache in (_service_tokens, _users, _rejected, _in_flight):
+        cache.clear()
+
+
+def _clock() -> float:
+    """Seconds since the epoch."""
+    import time
+
+    return time.time()
+
+
+def _remember(
+    cache: dict[str, tuple[float, Any]],
+    token: str,
+    until: float,
+    payload: Any,
+    size: int,
+) -> None:
+    """Store an entry, evicting expired entries, then the oldest, when full."""
+    if token not in cache and len(cache) >= size:
+        now = _clock()
+        for key in [k for k, entry in cache.items() if entry[0] <= now]:
+            del cache[key]
+        if len(cache) >= size:
+            del cache[next(iter(cache))]
+    cache[token] = (until, payload)
+
+
+async def _lookup(token: str, kind: str, claims: dict[str, Any]) -> tuple[str, Any]:
+    """Check a token with Supabase Auth, through the caches: ("ok", payload),
+    ("invalid", None) or ("unavailable", None).
+
+    A check of the same token already running is waited for, not repeated.
+    Past _MAX_IN_FLIGHT checks at once, or when Auth can't answer, the result
+    is "unavailable" and nothing is cached, so callers fail closed.
+    """
+    cache = _service_tokens if kind == "service" else _users
+    for _ in range(100):
+        now = _clock()
+        hit = cache.get(token)
+        if hit is not None and hit[0] > now:
+            return "ok", hit[1]
+        refused = _rejected.get(token)
+        if refused is not None and refused[0] > now:
+            return "invalid", None
+        if token not in _in_flight:
+            break
+        await sleep(0.05)
+    else:
+        return "unavailable", None
+    if len(_in_flight) >= _MAX_IN_FLIGHT:
+        return "unavailable", None
+    _in_flight[token] = True
+    try:
+        state, payload = await _ask_auth(token, kind, claims)
+    finally:
+        del _in_flight[token]
+    now = _clock()
+    if state == "ok":
+        until = now + _VERIFIED_SECONDS
+        exp = claims.get("exp")
+        if isinstance(exp, (int, float)):
+            until = min(until, float(exp))
+        _remember(cache, token, until, payload, _CACHE_SIZE)
+    elif state == "invalid":
+        _remember(_rejected, token, now + _REJECTED_SECONDS, None, _REJECTED_SIZE)
+    return state, payload
+
+
+async def _ask_auth(token: str, kind: str, claims: dict[str, Any]) -> tuple[str, Any]:
+    """One call to Supabase Auth, which verifies the token's signature.
+
+    A service role token must be accepted for an admin call; a user token
+    must load its user, whose id must equal the token's sub.
+    """
+    from supie.supabase import fetch
+
+    url = env.get("SUPABASE_URL")
+    if kind == "service":
+        path, key = "/auth/v1/admin/users?page=1&per_page=1", token
+    else:
+        path, key = "/auth/v1/user", _public_key()
+    if not url or not key:
+        return "unavailable", None
+    try:
+        response = await fetch(
+            "GET",
+            url.rstrip("/") + path,
+            {"apikey": key, "Authorization": "Bearer " + token},
+        )
+    except Exception:
+        return "unavailable", None
+    status = response["status"]
+    if status in (400, 401, 403, 404):
+        return "invalid", None
+    if status != 200:
+        return "unavailable", None
+    if kind == "service":
+        return "ok", None
+    try:
+        user = json.loads(response["body"] or "null")
+    except ValueError:
+        return "unavailable", None
+    if (
+        not isinstance(user, dict)
+        or not user.get("id")
+        or user.get("id") != claims.get("sub")
+    ):
+        return "invalid", None
+    return "ok", None
 
 
 def _b64url_decode(segment: str) -> bytes:
@@ -276,25 +419,46 @@ class Request:
                         return True
         if not token:
             return False
-        if self.is_service or token in _service_tokens:
+        if self.is_service:
             return True
-        url = env.get("SUPABASE_URL")
-        if not url or (self.user or {}).get("role") != "service_role":
+        claims = self.user or {}
+        if claims.get("role") != "service_role":
             return False
-        from supie.supabase import fetch
+        state, _ = await _lookup(token, "service", claims)
+        return state == "ok"
 
+    async def verified_user(self) -> dict[str, Any] | None:
+        """The signed-in caller's claims, verified with Supabase Auth, or None
+        for a caller without a user token (anonymous, an API key, the service
+        role).
+
+        Raises HTTPError 401 for a token Auth refuses, or one that isn't a JWT,
+        and 503 when Auth can't be asked, so a presented token never counts as
+        anonymous. A verified token is trusted until it expires, at most an
+        hour, in this worker.
+        """
+        token = self.token
+        claims = self.user
+        if token and claims is None and token[:3] != "sb_":
+            raise HTTPError(401, "invalid token")
+        if not token or not claims or claims.get("role") != "authenticated":
+            return None
+        state, _ = await _lookup(token, "user", claims)
+        if state == "invalid":
+            raise HTTPError(401, "invalid token")
+        if state != "ok":
+            raise HTTPError(503, "can't verify the token now")
+        return claims
+
+    def query_number(self, name: str, default: float) -> float:
+        """A numeric query parameter, or 400 when it isn't a finite number."""
         try:
-            response = await fetch(
-                "GET",
-                url.rstrip("/") + "/auth/v1/admin/users?page=1&per_page=1",
-                {"apikey": token, "Authorization": "Bearer " + token},
-            )
-        except Exception:
-            return False
-        if response["status"] != 200:
-            return False
-        _service_tokens.add(token)
-        return True
+            value = float(self.query.get(name, str(default)))
+        except ValueError:
+            value = float("nan")
+        if value != value or abs(value) == float("inf"):
+            raise HTTPError(400, name + " must be a number")
+        return value
 
     @property
     def supabase(self) -> Supabase:

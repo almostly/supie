@@ -8,7 +8,7 @@ import pytest
 
 from supie import App, sleep
 from supie.flow import Flow, MemoryStore, StepFailed
-from supie.testing import TestClient, run
+from supie.testing import FakeResponse, TestClient, run
 
 
 def scoring_flow(store=None, calls=None):
@@ -209,18 +209,30 @@ def test_outputs_must_be_json():
 SERVICE = {"Authorization": "Bearer service-role-key"}  # DEFAULT_ENV's key
 
 
-def token(claims):
-    """A bearer token with these claims (the gateway would have verified it)."""
+def token(claims, signature="sig"):
+    """A bearer token with these claims; the fake Auth accepts the "sig" signature."""
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
-    return {"Authorization": f"Bearer x.{payload}.sig"}
+    return {"Authorization": f"Bearer x.{payload}.{signature}"}
 
 
-def mounted():
+def auth(call):
+    """Supabase Auth: loads the user of a token signed "sig", refuses the rest."""
+    if not call.url.endswith("/auth/v1/user"):
+        return FakeResponse("", 404)
+    bearer = call.headers["Authorization"][7:]
+    if not bearer.endswith(".sig"):
+        return FakeResponse({"msg": "invalid JWT"}, 401)
+    part = bearer.split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+    return FakeResponse({"id": claims["sub"]})
+
+
+def mounted(fetch=auth, env=None):
     """An app with the scoring flow mounted at /flows/scoring."""
     app = App()
     flow = scoring_flow()
     flow.mount(app, "/flows/scoring")
-    return TestClient(app), flow
+    return TestClient(app, fetch=fetch, env=env), flow
 
 
 def test_mount_start_and_status():
@@ -262,9 +274,46 @@ def test_claiming_the_service_role_is_not_enough():
     run_id = client.post("/flows/scoring", json={"id": 1}, headers=alice).json()[
         "run_id"
     ]
-    forged = token({"role": "service_role"})
+    forged = token({"role": "service_role"}, signature="forged")
     assert client.get(f"/flows/scoring/{run_id}", headers=forged).status == 404
     assert client.post("/flows/scoring/resume-stale", headers=forged).status == 403
+
+
+def test_a_forged_user_token_is_refused():
+    """A token claiming another user's ID, refused by Auth, can't read or
+    resume their run, and starting a run with one records no owner: it's 401.
+    """
+    client, flow = mounted()
+    alice = token({"role": "authenticated", "sub": "alice"})
+    run_id = client.post("/flows/scoring", json={"id": 1}, headers=alice).json()[
+        "run_id"
+    ]
+    as_alice = token({"role": "authenticated", "sub": "alice"}, signature="forged")
+    assert client.get(f"/flows/scoring/{run_id}", headers=as_alice).status == 401
+    assert (
+        client.post(f"/flows/scoring/{run_id}/resume", headers=as_alice).status == 401
+    )
+    before = set(flow.store.runs)
+    assert client.post("/flows/scoring", json={"id": 2}, headers=as_alice).status == 401
+    assert set(flow.store.runs) == before
+
+
+def test_starting_a_run_fails_closed_when_auth_cant_answer():
+    """With Auth unreachable, or no key to call it with, a signed-in start
+    answers 503 and creates no run; a request without a token still starts one.
+    """
+    alice = token({"role": "authenticated", "sub": "alice"})
+
+    def down(call):
+        """Auth is unreachable."""
+        raise ConnectionError("auth is down")
+
+    for client, flow in (mounted(fetch=down), mounted(env={"SUPABASE_ANON_KEY": ""})):
+        assert (
+            client.post("/flows/scoring", json={"id": 1}, headers=alice).status == 503
+        )
+        assert flow.store.runs == {}
+        assert client.post("/flows/scoring", json={"id": 1}).status == 202
 
 
 def test_number_parameters_are_checked_and_capped():

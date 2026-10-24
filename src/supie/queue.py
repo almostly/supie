@@ -372,10 +372,7 @@ class Queue:
         async def work(req: Request) -> dict[str, int]:
             """Handle waiting messages."""
             await service_only(req)
-            try:
-                seconds = float(req.query.get("seconds", "60"))
-            except ValueError:
-                raise HTTPError(400, "seconds must be a number") from None
+            seconds = req.query_number("seconds", 60)
             return await queue.work(req, seconds=min(max(seconds, 0), max_seconds))
 
         @app.get(prefix + "/stats")
