@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Flow run ownership is verified with Supabase Auth. With `verify_jwt` off, a token claiming another user's ID could read or resume their run, and a forged ID was recorded as the owner of a new run; such tokens now get 401, and a start whose token can't be verified creates no run.
+- Flow run ownership is verified with Supabase Auth. With `verify_jwt` off, a token claiming another user's ID could read or resume their run, and a forged ID was recorded as the owner of a new run; such tokens now get 401, and a start whose token can't be verified creates no run. Verified on hosted Supabase with ES256-signed user tokens and `verify_jwt` off.
 - Token checks with Supabase Auth are bounded: refused tokens are remembered for a minute, verified ones until they expire and at most an hour, and caches hold SHA-256 digests of at most 1,024 tokens, never the tokens. Expired tokens, tokens for another project and tokens over 4 KB are refused without a call. A worker checks at most 16 tokens at once, a request waits up to a second for a slot and fails closed past that, Auth errors are never cached, and a refused service role token is logged with its status.
 - `Flow.start(input, request=req)` raises `HTTPError` 401 or 503 when the caller's token can't be verified, instead of starting an anonymous run.
 - The durable flow work endpoint caps `?seconds=` at `mount(..., durable=True, max_seconds=140)`, like the queue's. It, the queue's work endpoint and `resume-stale` answer 400 for a value that isn't a finite number, and `resume-stale` treats an idle time under 1 s as 1 s, so it can't resume runs whose workers are alive.
