@@ -30,6 +30,8 @@ supie is an independent almostly project, unaffiliated with Supabase.
 pip install supie
 ```
 
+Or install the `supie` command on its own with `uv tool install supie`.
+
 You also need the [Supabase CLI](https://supabase.com/docs/guides/cli). The Pyodide runtime needs Deno or Node.js at build time, to build its snapshot.
 
 ## Quickstart
