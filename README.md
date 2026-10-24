@@ -61,7 +61,7 @@ Handling a request costs about the same as TypeScript, but a Python loop runs 45
 
 In a one-hour run on hosted Supabase, 99.95% of 3,916 scoring requests and 99.77% of 4,258 queued applications succeeded, with no server errors, and every application ended exactly once. See [performance and reliability](https://github.com/almostly/supie/blob/main/docs/performance.md).
 
-![An hour of traffic replayed in under a minute: requests flow through the edge function and the queue, and every application ends decided once or in the dead letters](https://github.com/almostly/supie/releases/download/0.1.0/supie-reliability-replay.gif)
+![Scoring traffic through a supie edge function: requests answered inline or queued in Postgres, and each queued application decided once or kept in the dead letters](https://raw.githubusercontent.com/almostly/supie/main/docs/images/supie_flow.png)
 
 ## Handlers
 
