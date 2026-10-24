@@ -40,6 +40,8 @@ dev = [
     # runs ONNX models in tests, standing in for the Edge Runtime; no wheels for 3.10
     "onnxruntime>=1.20; python_version >= '3.11'",
     "commitizen>=4",
+    "matplotlib>=3.10.9",
+    "ipython>=8.39.0",
 ]
 
 [build-system]
@@ -69,6 +71,10 @@ ignore = ["ANN401"]
 
 [tool.ty.src]
 exclude = ["prototype"]
+
+[tool.ty.environment]
+# the walkthrough notebook imports its diagram helpers from its own folder
+extra-paths = ["examples/notebooks"]
 
 [tool.ty.analysis]
 # optional: mlflow for `supie model publish`; pydantic and openpyxl only inside

@@ -1,0 +1,137 @@
+# Workflows
+
+A `Flow` chains steps, like AWS Step Functions over your edge functions. Steps run as soon as their dependencies are done, so independent ones run in parallel. Every finished step is saved, so a run can resume where it stopped, and the saved steps double as an audit trail.
+
+```python
+from supie import App, Request
+from supie.flow import Flow
+
+app = App()
+scoring = Flow("scoring")
+
+
+@scoring.step(retries=2, timeout=5)
+async def bureau(ctx, application):
+    return await ctx.invoke("bureau-fetch", application)  # another edge function
+
+
+@scoring.step(timeout=5)
+async def fraud(ctx, application):
+    return await ctx.invoke("fraud-check", application)
+
+
+@scoring.step(depends_on=[bureau, fraud])
+def score(ctx, application, bureau, fraud):
+    return {"pd": model(application, bureau), "fraud": fraud["flag"]}
+
+
+@scoring.step(depends_on=[score])
+def decide(ctx, application, score):
+    if score["fraud"]:
+        return ctx.goto(manual_review)
+    return {"decision": "approve" if score["pd"] < 0.08 else "decline"}
+
+
+@scoring.branch(depends_on=[score])
+async def manual_review(ctx, application, score):
+    await ctx.supabase.table("review_queue").insert({"application": application}).execute()
+    return {"decision": "refer"}
+
+
+@app.post("/decide")
+async def decide_now(req: Request):
+    result = await scoring.run(req.json(), request=req)  # inside the request
+    return result.output
+
+
+scoring.mount(app, "/flows/scoring")  # or start runs in the background
+```
+
+- **Steps.** A step receives a context, the flow's input and its dependencies' outputs, in the order of `depends_on`. It can be sync or async, and must return something JSON can hold.
+- **Retries and timeouts.** `retries` adds attempts after a failure, waiting `backoff`, then twice that, and so on. `timeout` fails an async step that runs too long. When the attempts run out, the step and the run are saved as failed and `run` raises `StepFailed`.
+- **Conditions.** `when=` runs a step only if its input contains a JSON pattern, and `unless=` skips it if it does. The input is the outputs of the step's dependencies, by step name, or the flow's input for a step without dependencies. So `when={"decide": {"route": "review"}}` runs a step only on that route. A skipped step's dependents still run and get `None` for it. These are pgflow's conditions, so they work in durable runs too.
+- **Branches.** A step returns `ctx.goto(branch)` to hand its result to a branch, which then counts as that step's output. Branches run only when a step goes to them. They work in inline runs only; durable runs use `when=`.
+- **The result.** It's the last step's output. A flow that ends in several steps returns a dict of them.
+- **Calling other functions.** `ctx.invoke` counts toward the [30 calls per trace](handlers.md#supabase-from-python), so a flow that fans out to other functions should stay well under 30 calls. Checkpoint writes don't count.
+- **Context.** `ctx` has `run_id`, `step`, `attempt`, `supabase` (as the caller when the run came from a request), `supabase_admin` and `invoke(name, body)` for calling other edge functions.
+- **Resuming.** Run the same run ID again with `scoring.run(None, run_id=...)`. Saved steps are skipped and the saved input is used.
+
+`scoring.mount(app, prefix)` adds these endpoints:
+
+| Endpoint | What it does |
+|---|---|
+| `POST <prefix>` | Starts a run with the JSON body as input, answering 202 with its `run_id`. The run continues after the response. |
+| `GET <prefix>/<run_id>` | Returns the status, output, error and every saved step. |
+| `POST <prefix>/<run_id>/resume` | Continues a run whose worker stopped. |
+| `POST <prefix>/resume-stale?idle=300` | For the service role: resumes every run idle that long. Call it from pg_cron. |
+
+A run started by a signed-in user is visible only to that user and the service role. Anyone else holding the random run ID can read a run started anonymously.
+
+## Inline speed
+
+Inline steps are plain function calls in one process, so a flow costs about what its steps compute. Six steps of scorecard logic on JSON input (features, then bins and policy rules in parallel, a score, and a route chosen with `when=`), with the memory store:
+
+| | per run, warm | first run in a request | request end to end |
+|---|---|---|---|
+| MicroPython, hosted | 2.7 ms | 5 ms | median 0.26 s |
+| Pyodide, hosted | 2 to 5 ms | 11 ms | median 0.8 s (cold boot) |
+
+End to end is mostly the worker's cold start and the network. The Supabase store adds a database write per step, and durable runs on pgflow add database round trips between steps, so use them for runs that must survive a worker and inline runs for a fast answer.
+
+## Checkpoint storage
+
+By default, checkpoints go to two tables in your project. Create them once:
+
+```bash
+supie flow migration  # writes supabase/migrations/<timestamp>_supie_flows.sql
+supabase db push
+```
+
+Only the service role can read or write those tables. For tests, pass `Flow("scoring", MemoryStore())` from `supie.flow`. The memory store only lasts as long as one worker, and hosted Supabase rarely reuses workers, so mounted flows need the tables.
+
+A background run lives as long as its worker: up to 150 s on the free plan and 400 s on paid plans. Waiting on I/O, such as another function, doesn't count against the 2 s CPU budget. For longer runs, resume stale ones on a schedule:
+
+```sql
+select cron.schedule('resume-scoring', '* * * * *', $$
+  select net.http_post(
+    url := 'https://<project>.supabase.co/functions/v1/<function>/flows/scoring/resume-stale',
+    headers := jsonb_build_object('Authorization', 'Bearer ' || '<service role key>')
+  )
+$$);
+```
+
+## Durable runs on pgflow
+
+Inline runs live inside one worker. For runs that must outlive any worker, run the same flow on [pgflow](https://pgflow.dev): Postgres schedules each step, keeps every output, and retries failed steps; supie's workers claim and run them.
+
+```bash
+npx pgflow@0.17.2 install  # pgflow's schema and queues
+supie flow migration --pgflow  # functions that let supie's workers reach pgflow
+supabase db push
+```
+
+```python
+scoring.mount(app, "/flows/scoring", durable=True)
+
+# or from your own handler:
+run_id = await scoring.start(application, request=req)
+state = await scoring.status(run_id)
+```
+
+| Endpoint | What it does |
+|---|---|
+| `POST <prefix>` | Starts a run on pgflow, answers 202 with its `run_id`, and works on it after the response. |
+| `GET <prefix>/<run_id>` | Returns the status, output and each step's state, including skipped steps and errors. |
+| `POST <prefix>/work?seconds=60` | For the service role: claims and runs waiting tasks. Call it from pg_cron, so runs continue after a worker stops. |
+
+- **The flow compiles itself.** On a worker's first run, supie sends the flow's shape to pgflow. A shape that differs from the one in the database is an error, so change a durable flow by giving it a new name.
+- **Retries are pgflow's.** `retries` and `backoff` become pgflow's max attempts and base delay; a failed attempt goes back to the queue.
+- **Names are pgflow's.** Flow and step names use letters, digits and single underscores. `goto` branches aren't supported; use `when=`.
+- **Bridged over PostgREST.** pgflow's functions live in the `pgflow` and `pgmq` schemas, which PostgREST doesn't expose, and WebAssembly can't open a Postgres connection. The `--pgflow` migration adds `supie_pgflow_*` functions that only the service role can call.
+
+- **pgflow's telemetry is on by default.** Its install schedules a daily job that sends anonymous, bucketed usage counts (runs, workers, which features are used) to telemetry.pgflow.dev. Turn it off with `select pgflow_telemetry.disable();`, or preview the payload with `select pgflow_telemetry.preview();`.
+- **pgflow's install schedules cron jobs.** `pgflow_ensure_workers`, `pgflow_requeue_stalled_tasks` and `pgflow_cleanup_logs`, and it enables `pgmq`, `pg_cron` and `pg_net`.
+
+Overhead: each level of steps costs three database calls (read, claim, complete). Locally, a chain of four no-op steps took 44 ms from start to completion by pgflow's timestamps, and four parallel steps feeding a fifth took the same, so parallel steps are free. On hosted Supabase each call also crosses the network to the database.
+
+Tested against pgflow 0.17.2 locally and on hosted Supabase, with workers on MicroPython and Pyodide: parallel steps, a failed attempt retried by pgflow, a skipped route and the endpoints. Each hosted run took 4 to 7 s end to end.
