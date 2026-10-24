@@ -234,6 +234,18 @@ def test_secret_api_keys_pass_the_service_check():
 
     single = TestClient(app, env={"SUPABASE_SECRET_KEY": "sb_secret_local"})
     assert single.get("/q/stats", headers={"apikey": "sb_secret_local"}).status == 200
+    for broken in ("not json", '["sb_secret_local"]'):
+        fallback = TestClient(
+            app,
+            env={
+                "SUPABASE_SECRET_KEYS": broken,
+                "SUPABASE_SECRET_KEY": "sb_secret_local",
+            },
+        )
+        assert (
+            fallback.get("/q/stats", headers={"apikey": "sb_secret_local"}).status
+            == 200
+        )
 
 
 def test_work_seconds_are_capped_and_checked():

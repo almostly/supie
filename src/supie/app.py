@@ -161,10 +161,11 @@ def _secret_keys() -> list[str]:
         try:
             keys = json.loads(raw)
         except ValueError:
-            return []
-        if not isinstance(keys, dict):
-            return []
-        return [value for value in keys.values() if isinstance(value, str) and value]
+            keys = None
+        if isinstance(keys, dict):
+            return [
+                value for value in keys.values() if isinstance(value, str) and value
+            ]
     single = env.get("SUPABASE_SECRET_KEY")
     return [single] if single else []
 
